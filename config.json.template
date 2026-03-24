@@ -1,0 +1,20 @@
+{
+  "listen_addr": "127.0.0.1:443",
+  "tls_cert_file": "./cert/api.openai.com.crt",
+  "tls_key_file": "./cert/api.openai.com.key",
+  "upstream_base_url": "https://yourdomain.com",
+  "routes": [
+    {
+      "path": "/v1/chat/completions",
+      "target_path": "/v1/chat/completions"
+    },
+    {
+      "path": "/v1/models",
+      "target_path": "/v1/models"
+    },
+    {
+      "path": "/v1/responses",
+      "target_path": "/v1/responses"
+    }
+  ]
+}

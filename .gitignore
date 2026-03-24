@@ -1,0 +1,5 @@
+./gen-certs
+./go-to-openai
+./certs
+./scripts
+./config.json
