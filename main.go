@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -25,6 +27,7 @@ const (
 	defaultUpstream   = "http://api.openai.com"
 	defaultConfigFile = "./config.json"
 	defaultRetryMax   = 3
+	defaultLogsDir    = ".logs"
 )
 
 type config struct {
@@ -40,6 +43,11 @@ type config struct {
 type routeConfig struct {
 	Path       string `json:"path"`
 	TargetPath string `json:"target_path"`
+}
+
+type startupOptions struct {
+	ConfigFile string
+	Debug      bool
 }
 
 func defaultConfig() config {
@@ -73,11 +81,15 @@ func loadConfig(configFile string) (config, error) {
 	return cfg, nil
 }
 
-func parseFlags(args []string) string {
+func parseFlags(args []string) startupOptions {
 	flagSet := flag.NewFlagSet("go-to-openai", flag.ExitOnError)
 	configFile := flagSet.String("config", defaultConfigFile, "path to config file")
+	debug := flagSet.Bool("debug", false, "enable debug request logging")
 	_ = flagSet.Parse(args)
-	return strings.TrimSpace(*configFile)
+	return startupOptions{
+		ConfigFile: strings.TrimSpace(*configFile),
+		Debug:      *debug,
+	}
 }
 
 func mergeJSONConfig(cfg *config, filePath string) error {
@@ -167,13 +179,13 @@ type route struct {
 }
 
 func main() {
-	configFile := parseFlags(os.Args[1:])
-	cfg, err := loadConfig(configFile)
+	opts := parseFlags(os.Args[1:])
+	cfg, err := loadConfig(opts.ConfigFile)
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
 
-	handler, err := newHandler(cfg)
+	handler, err := newHandler(cfg, opts.Debug)
 	if err != nil {
 		log.Fatalf("build handler: %v", err)
 	}
@@ -185,12 +197,15 @@ func main() {
 	}
 
 	log.Printf("listening on %s and proxying to %s", cfg.ListenAddr, cfg.Upstream)
+	if opts.Debug {
+		log.Printf("debug mode enabled, request dumps will be written to %s", defaultLogsDir)
+	}
 	if err := server.ListenAndServeTLS(cfg.CertFile, cfg.KeyFile); err != nil {
 		log.Fatalf("listen tls: %v", err)
 	}
 }
 
-func newHandler(cfg config) (http.Handler, error) {
+func newHandler(cfg config, debug bool) (http.Handler, error) {
 	target, err := url.Parse(cfg.Upstream)
 	if err != nil {
 		return nil, err
@@ -220,6 +235,10 @@ func newHandler(cfg config) (http.Handler, error) {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusNotFound, "unsupported path")
 	})
+
+	if debug {
+		return debugMiddleware(mux), nil
+	}
 
 	return mux, nil
 }
@@ -394,6 +413,44 @@ func transportOrDefault(transport http.RoundTripper) http.RoundTripper {
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
+	}
+}
+
+func debugMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		payload, err := dumpRequest(r)
+		if err != nil {
+			log.Printf("dump request error: method=%s path=%s err=%v", r.Method, r.URL.Path, err)
+		} else {
+			go writeDebugRequest(payload)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func dumpRequest(r *http.Request) ([]byte, error) {
+	body, err := snapshotRequestBody(r)
+	if err != nil {
+		return nil, err
+	}
+
+	clonedReq, err := cloneRequest(r, body)
+	if err != nil {
+		return nil, err
+	}
+
+	return httputil.DumpRequest(clonedReq, true)
+}
+
+func writeDebugRequest(payload []byte) {
+	if err := os.MkdirAll(defaultLogsDir, 0o755); err != nil {
+		log.Printf("create debug log dir error: err=%v", err)
+		return
+	}
+
+	filePath := filepath.Join(defaultLogsDir, fmt.Sprintf("request_%d.txt", time.Now().UnixNano()))
+	if err := os.WriteFile(filePath, payload, 0o600); err != nil {
+		log.Printf("write debug request error: path=%s err=%v", filePath, err)
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -61,7 +62,7 @@ func TestChatCompletionsProxy(t *testing.T) {
 				Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
 			}, nil
 		}),
-	})
+	}, false)
 
 	payload := []byte(`{"model":"gpt-5.4-mini","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
 	req, err := http.NewRequest(http.MethodPost, "https://api.openai.com/v1/chat/completions?trace=1", bytes.NewReader(payload))
@@ -139,7 +140,7 @@ func TestModelsProxy(t *testing.T) {
 				Body:       io.NopCloser(strings.NewReader(`{"data":[]}`)),
 			}, nil
 		}),
-	})
+	}, false)
 
 	req, err := http.NewRequest(http.MethodGet, "https://api.openai.com/v1/models?limit=10", nil)
 	if err != nil {
@@ -192,7 +193,7 @@ func TestResponsesProxy(t *testing.T) {
 				Body:       io.NopCloser(strings.NewReader("data: hello\n\ndata: done\n\n")),
 			}, nil
 		}),
-	})
+	}, false)
 
 	req, err := http.NewRequest(http.MethodPost, "https://api.openai.com/v1/responses", bytes.NewBufferString(`{"model":"gpt-5.1","stream":true}`))
 	if err != nil {
@@ -236,7 +237,7 @@ func TestCustomRouteConfig(t *testing.T) {
 				Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
 			}, nil
 		}),
-	})
+	}, false)
 
 	req, err := http.NewRequest(http.MethodPost, "https://api.openai.com/v1/embeddings", bytes.NewBufferString(`{"input":"hello"}`))
 	if err != nil {
@@ -320,13 +321,110 @@ func TestRetryTransportDoesNotRetryNonRetryableError(t *testing.T) {
 func TestParseFlags(t *testing.T) {
 	t.Parallel()
 
-	if got := parseFlags(nil); got != defaultConfigFile {
-		t.Fatalf("default config file = %s", got)
+	opts := parseFlags(nil)
+	if opts.ConfigFile != defaultConfigFile {
+		t.Fatalf("default config file = %s", opts.ConfigFile)
+	}
+	if opts.Debug {
+		t.Fatalf("debug = %v", opts.Debug)
 	}
 
 	custom := "/tmp/custom-config.json"
-	if got := parseFlags([]string{"-config", custom}); got != custom {
-		t.Fatalf("config file = %s", got)
+	opts = parseFlags([]string{"-config", custom, "-debug"})
+	if opts.ConfigFile != custom {
+		t.Fatalf("config file = %s", opts.ConfigFile)
+	}
+	if !opts.Debug {
+		t.Fatalf("debug = %v", opts.Debug)
+	}
+}
+
+func TestDumpRequestPreservesBody(t *testing.T) {
+	t.Parallel()
+
+	payload := `{"message":"hello"}`
+	req, err := http.NewRequest(http.MethodPost, "https://api.openai.com/v1/chat/completions?trace=1", strings.NewReader(payload))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	dump, err := dumpRequest(req)
+	if err != nil {
+		t.Fatalf("dump request: %v", err)
+	}
+	if !strings.Contains(string(dump), payload) {
+		t.Fatalf("dump = %s", string(dump))
+	}
+
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if string(body) != payload {
+		t.Fatalf("body = %s", string(body))
+	}
+}
+
+func TestDebugMiddlewareWritesRequestDump(t *testing.T) {
+	tempDir := t.TempDir()
+	originalWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer func() {
+		if err := os.Chdir(originalWd); err != nil {
+			t.Fatalf("restore chdir: %v", err)
+		}
+	}()
+
+	handler := debugMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	req, err := http.NewRequest(http.MethodPost, "https://api.openai.com/v1/chat/completions", strings.NewReader(`{"hello":"world"}`))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+
+	logsDir := filepath.Join(tempDir, defaultLogsDir)
+	var logFile string
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		entries, err := os.ReadDir(logsDir)
+		if err == nil && len(entries) > 0 {
+			logFile = filepath.Join(logsDir, entries[0].Name())
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if logFile == "" {
+		t.Fatalf("debug log file was not created")
+	}
+	if !strings.HasPrefix(filepath.Base(logFile), "request_") || !strings.HasSuffix(filepath.Base(logFile), ".txt") {
+		t.Fatalf("log file = %s", logFile)
+	}
+
+	content, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	if !strings.Contains(string(content), "POST /v1/chat/completions HTTP/1.1") {
+		t.Fatalf("content = %s", string(content))
+	}
+	if !strings.Contains(string(content), `{"hello":"world"}`) {
+		t.Fatalf("content = %s", string(content))
 	}
 }
 
@@ -389,7 +487,7 @@ func TestUnsupportedPath(t *testing.T) {
 	handler := newTestHandler(t, config{
 		Upstream: defaultUpstream,
 		Routes:   defaultConfig().Routes,
-	})
+	}, false)
 	recorder := httptest.NewRecorder()
 	req, err := http.NewRequest(http.MethodGet, "https://api.openai.com/v1/unknown", nil)
 	if err != nil {
@@ -411,7 +509,7 @@ func TestUnsupportedPath(t *testing.T) {
 	}
 }
 
-func newTestHandler(t *testing.T, cfg config) http.Handler {
+func newTestHandler(t *testing.T, cfg config, debug bool) http.Handler {
 	t.Helper()
 
 	if cfg.Upstream == "" {
@@ -424,7 +522,7 @@ func newTestHandler(t *testing.T, cfg config) http.Handler {
 		cfg.Routes = defaultConfig().Routes
 	}
 
-	handler, err := newHandler(cfg)
+	handler, err := newHandler(cfg, debug)
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
 	}
