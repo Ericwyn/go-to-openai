@@ -3,12 +3,16 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"testing"
 )
 
@@ -250,6 +254,82 @@ func TestCustomRouteConfig(t *testing.T) {
 	}
 }
 
+func TestRetryTransportRetriesRetryableError(t *testing.T) {
+	t.Parallel()
+
+	var attempts atomic.Int32
+	transport := newRetryTransport(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		attempt := attempts.Add(1)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		if string(body) != `{"hello":"world"}` {
+			t.Fatalf("body = %s", string(body))
+		}
+		if attempt < 3 {
+			return nil, &net.OpError{Err: syscall.EPIPE}
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+		}, nil
+	}), 3)
+
+	req, err := http.NewRequest(http.MethodPost, "https://api.openai.com/v1/chat/completions", bytes.NewBufferString(`{"hello":"world"}`))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("round trip: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if attempts.Load() != 3 {
+		t.Fatalf("attempts = %d", attempts.Load())
+	}
+}
+
+func TestRetryTransportDoesNotRetryNonRetryableError(t *testing.T) {
+	t.Parallel()
+
+	var attempts atomic.Int32
+	expectedErr := errors.New("bad request")
+	transport := newRetryTransport(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		attempts.Add(1)
+		return nil, expectedErr
+	}), 3)
+
+	req, err := http.NewRequest(http.MethodGet, "https://api.openai.com/v1/models", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+
+	_, err = transport.RoundTrip(req)
+	if !errors.Is(err, expectedErr) {
+		t.Fatalf("err = %v", err)
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("attempts = %d", attempts.Load())
+	}
+}
+
+func TestParseFlags(t *testing.T) {
+	t.Parallel()
+
+	if got := parseFlags(nil); got != defaultConfigFile {
+		t.Fatalf("default config file = %s", got)
+	}
+
+	custom := "/tmp/custom-config.json"
+	if got := parseFlags([]string{"-config", custom}); got != custom {
+		t.Fatalf("config file = %s", got)
+	}
+}
+
 func TestLoadConfigFromJSONAndEnvOverride(t *testing.T) {
 	tempDir := t.TempDir()
 	configPath := filepath.Join(tempDir, "config.json")
@@ -258,6 +338,7 @@ func TestLoadConfigFromJSONAndEnvOverride(t *testing.T) {
 		"tls_cert_file": "./custom.crt",
 		"tls_key_file": "./custom.key",
 		"upstream_base_url": "http://json-upstream.test",
+		"retry_max": 2,
 		"routes": [
 			{
 				"path": "/v1/embeddings",
@@ -269,10 +350,9 @@ func TestLoadConfigFromJSONAndEnvOverride(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	t.Setenv("CONFIG_FILE", configPath)
 	t.Setenv("UPSTREAM_BASE_URL", "http://env-upstream.test")
 
-	cfg, err := loadConfig()
+	cfg, err := loadConfig(configPath)
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
@@ -288,6 +368,9 @@ func TestLoadConfigFromJSONAndEnvOverride(t *testing.T) {
 	}
 	if cfg.Upstream != "http://env-upstream.test" {
 		t.Fatalf("upstream = %s", cfg.Upstream)
+	}
+	if cfg.RetryMax != 2 {
+		t.Fatalf("retry max = %d", cfg.RetryMax)
 	}
 	if len(cfg.Routes) != 1 {
 		t.Fatalf("routes len = %d", len(cfg.Routes))
@@ -333,6 +416,9 @@ func newTestHandler(t *testing.T, cfg config) http.Handler {
 
 	if cfg.Upstream == "" {
 		cfg.Upstream = defaultUpstream
+	}
+	if cfg.RetryMax == 0 {
+		cfg.RetryMax = defaultRetryMax
 	}
 	if len(cfg.Routes) == 0 {
 		cfg.Routes = defaultConfig().Routes
