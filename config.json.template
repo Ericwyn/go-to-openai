@@ -3,6 +3,7 @@
   "tls_cert_file": "./cert/api.openai.com.crt",
   "tls_key_file": "./cert/api.openai.com.key",
   "upstream_base_url": "https://yourdomain.com",
+  "upstream_base_host": "yourdomain.com",
   "retry_max": 3,
   "routes": [
     {

@@ -33,6 +33,8 @@ func TestChatCompletionsProxy(t *testing.T) {
 		Authorization string
 		ContentType   string
 		UserAgent     string
+		Host          string
+		HeaderHost    string
 		Body          []byte
 	}
 
@@ -53,6 +55,8 @@ func TestChatCompletionsProxy(t *testing.T) {
 				Authorization: r.Header.Get("Authorization"),
 				ContentType:   r.Header.Get("Content-Type"),
 				UserAgent:     r.Header.Get("User-Agent"),
+				Host:          r.Host,
+				HeaderHost:    r.Header.Get("Host"),
 				Body:          body,
 			}
 
@@ -106,6 +110,12 @@ func TestChatCompletionsProxy(t *testing.T) {
 	}
 	if captured.UserAgent != "proxy-test" {
 		t.Fatalf("user agent = %s", captured.UserAgent)
+	}
+	if captured.Host != "api.openai.com" {
+		t.Fatalf("host = %s", captured.Host)
+	}
+	if captured.HeaderHost != "api.openai.com" {
+		t.Fatalf("header host = %s", captured.HeaderHost)
 	}
 	if !bytes.Equal(captured.Body, payload) {
 		t.Fatalf("body mismatch = %s", string(captured.Body))
@@ -255,6 +265,49 @@ func TestCustomRouteConfig(t *testing.T) {
 	}
 }
 
+func TestProxyUsesConfiguredUpstreamHost(t *testing.T) {
+	t.Parallel()
+
+	type capturedRequest struct {
+		Host       string
+		HeaderHost string
+	}
+
+	requests := make(chan capturedRequest, 1)
+	handler := newTestHandler(t, config{
+		Upstream:     "http://127.0.0.1:8080",
+		UpstreamHost: "proxy.example.com",
+		Routes:       defaultConfig().Routes,
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			requests <- capturedRequest{
+				Host:       r.Host,
+				HeaderHost: r.Header.Get("Host"),
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			}, nil
+		}),
+	}, false)
+
+	req, err := http.NewRequest(http.MethodGet, "https://api.openai.com/v1/models", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+
+	captured := <-requests
+	if captured.Host != "proxy.example.com" {
+		t.Fatalf("host = %s", captured.Host)
+	}
+	if captured.HeaderHost != "proxy.example.com" {
+		t.Fatalf("header host = %s", captured.HeaderHost)
+	}
+}
+
 func TestRetryTransportRetriesRetryableError(t *testing.T) {
 	t.Parallel()
 
@@ -279,6 +332,70 @@ func TestRetryTransportRetriesRetryableError(t *testing.T) {
 	}), 3)
 
 	req, err := http.NewRequest(http.MethodPost, "https://api.openai.com/v1/chat/completions", bytes.NewBufferString(`{"hello":"world"}`))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("round trip: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if attempts.Load() != 3 {
+		t.Fatalf("attempts = %d", attempts.Load())
+	}
+}
+
+func TestRetryTransportRetriesConnectionRefused(t *testing.T) {
+	t.Parallel()
+
+	var attempts atomic.Int32
+	transport := newRetryTransport(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		attempt := attempts.Add(1)
+		if attempt < 3 {
+			return nil, &net.OpError{Err: syscall.ECONNREFUSED}
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+		}, nil
+	}), 3)
+
+	req, err := http.NewRequest(http.MethodGet, "https://api.openai.com/v1/models", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("round trip: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if attempts.Load() != 3 {
+		t.Fatalf("attempts = %d", attempts.Load())
+	}
+}
+
+func TestRetryTransportRetriesTimedOutOpError(t *testing.T) {
+	t.Parallel()
+
+	var attempts atomic.Int32
+	transport := newRetryTransport(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		attempt := attempts.Add(1)
+		if attempt < 3 {
+			return nil, &net.OpError{Err: syscall.ETIMEDOUT}
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+		}, nil
+	}), 3)
+
+	req, err := http.NewRequest(http.MethodGet, "https://api.openai.com/v1/models", nil)
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
@@ -436,6 +553,7 @@ func TestLoadConfigFromJSONAndEnvOverride(t *testing.T) {
 		"tls_cert_file": "./custom.crt",
 		"tls_key_file": "./custom.key",
 		"upstream_base_url": "http://json-upstream.test",
+		"upstream_base_host": "json-host.test",
 		"retry_max": 2,
 		"routes": [
 			{
@@ -449,6 +567,7 @@ func TestLoadConfigFromJSONAndEnvOverride(t *testing.T) {
 	}
 
 	t.Setenv("UPSTREAM_BASE_URL", "http://env-upstream.test")
+	t.Setenv("UPSTREAM_BASE_HOST", "env-host.test")
 
 	cfg, err := loadConfig(configPath)
 	if err != nil {
@@ -466,6 +585,9 @@ func TestLoadConfigFromJSONAndEnvOverride(t *testing.T) {
 	}
 	if cfg.Upstream != "http://env-upstream.test" {
 		t.Fatalf("upstream = %s", cfg.Upstream)
+	}
+	if cfg.UpstreamHost != "env-host.test" {
+		t.Fatalf("upstream host = %s", cfg.UpstreamHost)
 	}
 	if cfg.RetryMax != 2 {
 		t.Fatalf("retry max = %d", cfg.RetryMax)

@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -31,13 +30,14 @@ const (
 )
 
 type config struct {
-	ListenAddr string            `json:"listen_addr"`
-	CertFile   string            `json:"tls_cert_file"`
-	KeyFile    string            `json:"tls_key_file"`
-	Upstream   string            `json:"upstream_base_url"`
-	Routes     []routeConfig     `json:"routes"`
-	RetryMax   int               `json:"retry_max"`
-	Transport  http.RoundTripper `json:"-"`
+	ListenAddr   string            `json:"listen_addr"`
+	CertFile     string            `json:"tls_cert_file"`
+	KeyFile      string            `json:"tls_key_file"`
+	Upstream     string            `json:"upstream_base_url"`
+	UpstreamHost string            `json:"upstream_base_host"`
+	Routes       []routeConfig     `json:"routes"`
+	RetryMax     int               `json:"retry_max"`
+	Transport    http.RoundTripper `json:"-"`
 }
 
 type routeConfig struct {
@@ -117,6 +117,7 @@ func applyEnvOverrides(cfg *config) {
 	cfg.CertFile = envOrDefault("TLS_CERT_FILE", cfg.CertFile)
 	cfg.KeyFile = envOrDefault("TLS_KEY_FILE", cfg.KeyFile)
 	cfg.Upstream = envOrDefault("UPSTREAM_BASE_URL", cfg.Upstream)
+	cfg.UpstreamHost = envOrDefault("UPSTREAM_BASE_HOST", cfg.UpstreamHost)
 }
 
 func validateConfig(cfg config) error {
@@ -132,8 +133,20 @@ func validateConfig(cfg config) error {
 	if strings.TrimSpace(cfg.Upstream) == "" {
 		return errors.New("upstream_base_url is required")
 	}
-	if _, err := url.Parse(cfg.Upstream); err != nil {
+	upstreamURL, err := url.Parse(cfg.Upstream)
+	if err != nil {
 		return err
+	}
+	if upstreamURL.Scheme == "" || upstreamURL.Host == "" {
+		return errors.New("upstream_base_url must be a valid absolute URL")
+	}
+	if cfg.UpstreamHost != "" {
+		if strings.Contains(cfg.UpstreamHost, "://") {
+			return errors.New("upstream_base_host must be a host, not a URL")
+		}
+		if strings.TrimSpace(cfg.UpstreamHost) == "" {
+			return errors.New("upstream_base_host must not be empty")
+		}
 	}
 	if cfg.RetryMax < 0 {
 		return errors.New("retry_max must be greater than or equal to 0")
@@ -196,7 +209,8 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	log.Printf("listening on %s and proxying to %s", cfg.ListenAddr, cfg.Upstream)
+	log.Printf("[listening] : %s", cfg.ListenAddr)
+	log.Printf("[proxying] : %s", cfg.Upstream)
 	if opts.Debug {
 		log.Printf("debug mode enabled, request dumps will be written to %s", defaultLogsDir)
 	}
@@ -211,11 +225,16 @@ func newHandler(cfg config, debug bool) (http.Handler, error) {
 		return nil, err
 	}
 
+	upstreamHost := target.Host
+	if cfg.UpstreamHost != "" {
+		upstreamHost = cfg.UpstreamHost
+	}
+
 	routes := make([]route, 0, len(cfg.Routes))
 	for _, item := range cfg.Routes {
 		routes = append(routes, route{
 			Path:  item.Path,
-			Proxy: newRouteProxy(target, item.TargetPath, cfg.Transport, cfg.RetryMax),
+			Proxy: newRouteProxy(target, upstreamHost, item.TargetPath, cfg.Transport, cfg.RetryMax),
 		})
 	}
 
@@ -243,7 +262,7 @@ func newHandler(cfg config, debug bool) (http.Handler, error) {
 	return mux, nil
 }
 
-func newRouteProxy(target *url.URL, targetPath string, transport http.RoundTripper, retryMax int) *httputil.ReverseProxy {
+func newRouteProxy(target *url.URL, upstreamHost, targetPath string, transport http.RoundTripper, retryMax int) *httputil.ReverseProxy {
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.FlushInterval = -1
 	proxy.Transport = newRetryTransport(transportOrDefault(transport), retryMax)
@@ -254,7 +273,8 @@ func newRouteProxy(target *url.URL, targetPath string, transport http.RoundTripp
 		originalDirector(req)
 		req.URL.Path = targetPath
 		req.URL.RawPath = ""
-		req.Host = target.Host
+		req.Host = upstreamHost
+		req.Header.Set("Host", upstreamHost)
 		if incomingHost != "" {
 			req.Header.Set("X-Forwarded-Host", incomingHost)
 		}
@@ -316,85 +336,47 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 func snapshotRequestBody(req *http.Request) ([]byte, error) {
-	if req.Body == nil {
+	if req == nil || req.Body == nil {
 		return nil, nil
-	}
-	if req.GetBody != nil {
-		bodyReader, err := req.GetBody()
-		if err != nil {
-			return nil, err
-		}
-		defer bodyReader.Close()
-		return io.ReadAll(bodyReader)
 	}
 
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
 		return nil, err
 	}
-	_ = req.Body.Close()
+	if err := req.Body.Close(); err != nil {
+		return nil, err
+	}
+
 	req.Body = io.NopCloser(bytes.NewReader(body))
-	req.ContentLength = int64(len(body))
-	if len(body) == 0 {
-		req.GetBody = func() (io.ReadCloser, error) {
-			return http.NoBody, nil
-		}
-		return body, nil
-	}
-	bodyCopy := append([]byte(nil), body...)
-	req.GetBody = func() (io.ReadCloser, error) {
-		return io.NopCloser(bytes.NewReader(bodyCopy)), nil
-	}
 	return body, nil
 }
 
 func cloneRequest(req *http.Request, body []byte) (*http.Request, error) {
 	clonedReq := req.Clone(req.Context())
+	clonedReq.Body = io.NopCloser(bytes.NewReader(body))
+	clonedReq.ContentLength = int64(len(body))
 	if len(body) == 0 {
-		clonedReq.Body = http.NoBody
-		clonedReq.GetBody = func() (io.ReadCloser, error) {
-			return http.NoBody, nil
-		}
+		clonedReq.Body = nil
 		clonedReq.ContentLength = 0
-		return clonedReq, nil
-	}
-
-	bodyCopy := append([]byte(nil), body...)
-	clonedReq.Body = io.NopCloser(bytes.NewReader(bodyCopy))
-	clonedReq.ContentLength = int64(len(bodyCopy))
-	clonedReq.GetBody = func() (io.ReadCloser, error) {
-		return io.NopCloser(bytes.NewReader(bodyCopy)), nil
 	}
 	return clonedReq, nil
 }
 
 func isRetryableProxyError(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return false
-	}
-	if errors.Is(err, net.ErrClosed) || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ETIMEDOUT) {
-		return true
-	}
-
 	var netErr net.Error
-	if errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary()) {
+	if errors.As(err, &netErr) && netErr.Timeout() {
 		return true
 	}
 
 	var opErr *net.OpError
 	if errors.As(err, &opErr) {
-		return true
+		if errors.Is(opErr.Err, syscall.EPIPE) || errors.Is(opErr.Err, syscall.ECONNRESET) || errors.Is(opErr.Err, syscall.ECONNREFUSED) || errors.Is(opErr.Err, syscall.ETIMEDOUT) {
+			return true
+		}
 	}
 
-	message := strings.ToLower(err.Error())
-	return strings.Contains(message, "use of closed network connection") ||
-		strings.Contains(message, "connection reset by peer") ||
-		strings.Contains(message, "broken pipe") ||
-		strings.Contains(message, "connection refused") ||
-		strings.Contains(message, "timeout")
+	return false
 }
 
 func transportOrDefault(transport http.RoundTripper) http.RoundTripper {
@@ -402,18 +384,36 @@ func transportOrDefault(transport http.RoundTripper) http.RoundTripper {
 		return transport
 	}
 
-	return &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{
-			Timeout:   10 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          100,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-	}
+	return http.DefaultTransport
+}
+
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		wrapped := &statusRecorder{ResponseWriter: w, statusCode: http.StatusOK}
+		next.ServeHTTP(wrapped, r)
+		log.Printf("request completed: method=%s path=%s status=%d duration=%s", r.Method, r.URL.Path, wrapped.statusCode, time.Since(start))
+	})
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (r *statusRecorder) WriteHeader(statusCode int) {
+	r.statusCode = statusCode
+	r.ResponseWriter.WriteHeader(statusCode)
+}
+
+func writeJSONError(w http.ResponseWriter, statusCode int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	_ = json.NewEncoder(w).Encode(map[string]map[string]string{
+		"error": {
+			"message": message,
+		},
+	})
 }
 
 func debugMiddleware(next http.Handler) http.Handler {
@@ -452,23 +452,4 @@ func writeDebugRequest(payload []byte) {
 	if err := os.WriteFile(filePath, payload, 0o600); err != nil {
 		log.Printf("write debug request error: path=%s err=%v", filePath, err)
 	}
-}
-
-func writeJSONError(w http.ResponseWriter, status int, message string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"error": map[string]string{
-			"message": message,
-			"type":    "proxy_error",
-		},
-	})
-}
-
-func loggingMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		startedAt := time.Now()
-		next.ServeHTTP(w, r)
-		log.Printf("request method=%s path=%s remote=%s duration=%s", r.Method, r.URL.Path, r.RemoteAddr, time.Since(startedAt).Truncate(time.Millisecond))
-	})
 }
