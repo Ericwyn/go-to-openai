@@ -1,22 +1,8 @@
 # go-to-openai
 
-一个最小可用的 Go HTTPS 代理，用来在本地接管 `https://api.openai.com`，并把请求转发到 `http://yourdomain.com`。
+一个本地 HTTPS 反向代理，用于在本地拦截对 `api.openai.com`、`api.anthropic.com` 等域名的请求，并转发到你配置的上游服务器。
 
-目前处理三个 OpenAI 兼容入口：
-
-| 本地入口 | 转发目标 |
-|---|---|
-| `POST /v1/chat/completions` | `http://yourdomain.com/v1/chat/completions` |
-| `GET /v1/models` | `http://yourdomain.com/v1/models` |
-| `POST /v1/responses` | `http://yourdomain.com/openai/responses` |
-
-特性：
-
-- 保留原始请求体，不改参数
-- 透传 `Authorization`
-- 透传 query string
-- 支持流式响应转发
-- 默认读取 `go-to-openai/cert` 下的证书文件
+支持同时代理多个域名，每个域名可以配置不同的上游地址和路由规则。
 
 ## 目录
 
@@ -27,148 +13,158 @@ go-to-openai/
 │   └── gen-certs/
 │       ├── main.go
 │       └── main_test.go
-├── scripts/
-│   └── gen-certs.sh
 ├── go.mod
 ├── main.go
 ├── main_test.go
+├── config.json.template
 └── README.md
 ```
 
 ## 运行前提
 
-1. 本机 `hosts` 增加：
+1. 本机 `hosts` 增加需要代理的域名：
 
 ```text
 127.0.0.1 api.openai.com
+127.0.0.1 api.anthropic.com
 ```
 
-2. 系统信任 `go-to-openai/cert/openaica.crt`
+2. 系统信任生成的 CA 证书
 3. 本机 `443` 端口可用
 
 > Linux/macOS 监听 `443` 往往需要 `root` 或额外授权。
 
-## 先生成一套新证书
+## 生成证书
 
 在 `go-to-openai/` 目录执行：
 
 ```bash
-go run ./cmd/gen-certs
+go run ./cmd/gen-certs --domains api.openai.com,api.anthropic.com
 ```
 
-默认会生成一套适用于 `api.openai.com` 的证书文件：
+第一个域名会作为主域名，决定输出文件名；其余域名会写入同一张服务端证书的 SAN 中。
 
-- `cert/openaica.crt`
-- `cert/openaica.key`
-- `cert/api.openai.com.crt`
-- `cert/api.openai.com.key`
-- `cert/api.openai.com.csr`
+生成的文件：
 
-如果目录里已有同名文件，会先备份到 `cert/backup-时间戳/`。
-
-### 指定多个域名
-
-多个域名使用逗号分隔，第一个域名会作为主域名，同时决定输出文件名；其余域名会写入同一张服务端证书的 SAN 中。
-
-```bash
-go run ./cmd/gen-certs --domains api.openai.com,foo.local,127.0.0.1
-```
-
-上面的命令会生成：
-
-- `cert/openaica.crt`
-- `cert/openaica.key`
-- `cert/api.openai.com.crt`
-- `cert/api.openai.com.key`
-- `cert/api.openai.com.csr`
-
-其中 `api.openai.com.crt` 同时可用于：
-
-- `api.openai.com`
-- `foo.local`
-- `127.0.0.1`
+- `cert/openaica.crt` - CA 证书
+- `cert/openaica.key` - CA 私钥
+- `cert/api.openai.com.crt` - 服务端证书（包含所有域名的 SAN）
+- `cert/api.openai.com.key` - 服务端私钥
+- `cert/api.openai.com.csr` - 证书签名请求
 
 ### 指定输出目录
 
 ```bash
-go run ./cmd/gen-certs --output /tmp/my-openai-certs
+go run ./cmd/gen-certs --domains api.openai.com,api.anthropic.com --output /tmp/my-certs
 ```
 
 ### 自定义 CA 和证书有效期
 
 ```bash
 go run ./cmd/gen-certs \
-  --domains api.openai.com,foo.local \
+  --domains api.openai.com,api.anthropic.com \
   --ca-cn "My Local CA" \
   --ca-org "My Team" \
-  --server-org "My Dev Server" \
   --ca-days 3650 \
   --server-days 825
 ```
 
-## Linux 下导入、更新、删除 CA 证书
+## 导入 CA 证书
 
-以下示例适用于 Debian/Ubuntu 系系统。
-
-### 首次导入 CA
-
-生成完成后执行：
+### Debian/Ubuntu
 
 ```bash
 sudo cp cert/openaica.crt /usr/local/share/ca-certificates/openaica.crt
 sudo update-ca-certificates
 ```
 
-然后确认 `hosts`：
+### macOS
 
 ```bash
-echo '127.0.0.1 api.openai.com' | sudo tee -a /etc/hosts
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain cert/openaica.crt
 ```
-
-### 更新 CA
-
-如果你重新执行了 `go run ./cmd/gen-certs`，生成了新的 `cert/openaica.crt`，需要重新覆盖系统里的 CA 并刷新证书库：
-
-```bash
-sudo cp cert/openaica.crt /usr/local/share/ca-certificates/openaica.crt
-sudo update-ca-certificates
-```
-
-如果你之前已经把旧证书导入过，直接覆盖同名文件再执行 `update-ca-certificates` 即可。
 
 ### 删除 CA
 
-如果你不再需要这套本地 CA，可以删除系统中的证书并刷新证书库：
-
 ```bash
+# Debian/Ubuntu
 sudo rm -f /usr/local/share/ca-certificates/openaica.crt
 sudo update-ca-certificates --fresh
-```
 
-如果你还加过 `hosts`，也记得把对应记录删掉：
-
-```text
-127.0.0.1 api.openai.com
+# macOS
+sudo security delete-certificate -c "My Local CA" /Library/Keychains/System.keychain
 ```
 
 ## 配置
 
-支持以下环境变量：
+支持 JSON 配置文件和环境变量两种方式。环境变量优先级高于配置文件。
 
-| 变量名 | 默认值 | 说明 |
-|---|---|---|
-| `LISTEN_ADDR` | `:443` | HTTPS 监听地址 |
-| `TLS_CERT_FILE` | `./cert/api.openai.com.crt` | TLS 证书路径 |
-| `TLS_KEY_FILE` | `./cert/api.openai.com.key` | TLS 私钥路径 |
-| `UPSTREAM_BASE_URL` | `http://yourdomain.com` | 下游基础地址 |
+### JSON 配置文件
 
-如果你生成的是其他主域名证书，启动时记得同步调整：
+复制 `config.json.template` 为 `config.json` 并修改：
 
-```bash
-TLS_CERT_FILE=./cert/foo.local.crt \
-TLS_KEY_FILE=./cert/foo.local.key \
-go run .
+```json
+{
+  "listen_addr": "127.0.0.1:443",
+  "tls_cert_file": "./cert/api.openai.com.crt",
+  "tls_key_file": "./cert/api.openai.com.key",
+  "retry_max": 3,
+  "upstreams": [
+    {
+      "host": "api.openai.com",
+      "base_url": "http://openai-backend.local",
+      "base_host": "openai-backend.local",
+      "routes": [
+        {"path": "/v1/chat/completions", "target_path": "/v1/chat/completions"},
+        {"path": "/v1/models", "target_path": "/v1/models"},
+        {"path": "/v1/responses", "target_path": "/v1/responses"}
+      ]
+    },
+    {
+      "host": "api.anthropic.com",
+      "base_url": "http://anthropic-backend.local",
+      "base_host": "anthropic-backend.local",
+      "routes": [
+        {"path": "/v1/messages", "target_path": "/v1/messages"}
+      ]
+    }
+  ]
+}
 ```
+
+### 配置字段说明
+
+| 字段 | 说明 |
+|---|---|
+| `listen_addr` | HTTPS 监听地址，默认 `:443` |
+| `tls_cert_file` | TLS 证书路径 |
+| `tls_key_file` | TLS 私钥路径 |
+| `retry_max` | 网络错误时的最大重试次数，默认 `3` |
+| `upstreams` | 上游配置数组，至少需要一个 |
+
+### upstream 配置
+
+| 字段 | 说明 |
+|---|---|
+| `host` | 请求的 Host 头，用于匹配路由 |
+| `base_url` | 上游服务器地址 |
+| `base_host` | 可选，转发时设置的 Host 头，默认使用 `base_url` 的 Host |
+| `routes` | 路由规则数组 |
+
+### route 配置
+
+| 字段 | 说明 |
+|---|---|
+| `path` | 请求路径，必须以 `/` 开头 |
+| `target_path` | 转发到上游的路径，必须以 `/` 开头 |
+
+### 环境变量
+
+| 变量名 | 说明 |
+|---|---|
+| `LISTEN_ADDR` | HTTPS 监听地址 |
+| `TLS_CERT_FILE` | TLS 证书路径 |
+| `TLS_KEY_FILE` | TLS 私钥路径 |
 
 ## 启动
 
@@ -185,20 +181,22 @@ go build -o go-to-openai .
 ./go-to-openai
 ```
 
+指定配置文件：
+
+```bash
+go run . -config /path/to/config.json
+```
+
+开启调试模式（请求 dump 到 `.logs` 目录）：
+
+```bash
+go run . -debug
+```
+
 如果你只是本地验证，不想占用 `443`：
 
 ```bash
 LISTEN_ADDR=:8443 go run .
-```
-
-## 推荐启动方式
-
-```bash
-LISTEN_ADDR=:443 \
-TLS_CERT_FILE=./cert/api.openai.com.crt \
-TLS_KEY_FILE=./cert/api.openai.com.key \
-UPSTREAM_BASE_URL=http://yourdomain.com \
-go run .
 ```
 
 ## 健康检查
@@ -225,7 +223,6 @@ curl --location 'https://api.openai.com/v1/chat/completions' \
     "max_tokens": 2000,
     "temperature": 0,
     "model": "gpt-5.4-mini",
-    "enable_thinking": false,
     "stream": true
   }'
 ```
@@ -243,15 +240,12 @@ curl --location 'https://api.openai.com/v1/responses' \
   }'
 ```
 
-## 已验证内容
+## 特性
 
-本项目已通过本地自动化测试验证：
-
-- `/v1/chat/completions` 路径转发正确
-- `/v1/models` 路径转发正确
-- `/v1/responses` 路径改写正确
-- `Authorization` 和请求体透传正确
-- SSE 响应内容可回传
-- Go 版证书生成命令可正常工作
-
-由于当前环境禁止外网访问，无法在此环境直接请求真实的 `yourdomain.com` 做联调；上线前请在你的机器上按上面的步骤再做一次实测。
+- 支持多域名代理，根据 Host 头自动路由
+- 保留原始请求体，不改参数
+- 透传 `Authorization` 和 query string
+- 支持流式响应转发
+- 网络错误自动重试
+- 结构化日志输出
+- 调试模式可 dump 请求内容

@@ -7,7 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -23,21 +23,25 @@ const (
 	defaultListenAddr = ":443"
 	defaultCertFile   = "./cert/api.openai.com.crt"
 	defaultKeyFile    = "./cert/api.openai.com.key"
-	defaultUpstream   = "http://api.openai.com"
 	defaultConfigFile = "./config.json"
 	defaultRetryMax   = 3
 	defaultLogsDir    = ".logs"
 )
 
 type config struct {
-	ListenAddr   string            `json:"listen_addr"`
-	CertFile     string            `json:"tls_cert_file"`
-	KeyFile      string            `json:"tls_key_file"`
-	Upstream     string            `json:"upstream_base_url"`
-	UpstreamHost string            `json:"upstream_base_host"`
-	Routes       []routeConfig     `json:"routes"`
-	RetryMax     int               `json:"retry_max"`
-	Transport    http.RoundTripper `json:"-"`
+	ListenAddr string            `json:"listen_addr"`
+	CertFile   string            `json:"tls_cert_file"`
+	KeyFile    string            `json:"tls_key_file"`
+	Upstreams  []upstreamConfig  `json:"upstreams"`
+	RetryMax   int               `json:"retry_max"`
+	Transport  http.RoundTripper `json:"-"`
+}
+
+type upstreamConfig struct {
+	Host     string        `json:"host"`
+	BaseURL  string        `json:"base_url"`
+	BaseHost string        `json:"base_host"`
+	Routes   []routeConfig `json:"routes"`
 }
 
 type routeConfig struct {
@@ -55,12 +59,17 @@ func defaultConfig() config {
 		ListenAddr: defaultListenAddr,
 		CertFile:   defaultCertFile,
 		KeyFile:    defaultKeyFile,
-		Upstream:   defaultUpstream,
 		RetryMax:   defaultRetryMax,
-		Routes: []routeConfig{
-			{Path: "/v1/chat/completions", TargetPath: "/v1/chat/completions"},
-			{Path: "/v1/models", TargetPath: "/v1/models"},
-			{Path: "/v1/responses", TargetPath: "/openai/responses"},
+		Upstreams: []upstreamConfig{
+			{
+				Host:    "api.openai.com",
+				BaseURL: "http://api.openai.com",
+				Routes: []routeConfig{
+					{Path: "/v1/chat/completions", TargetPath: "/v1/chat/completions"},
+					{Path: "/v1/models", TargetPath: "/v1/models"},
+					{Path: "/v1/responses", TargetPath: "/openai/responses"},
+				},
+			},
 		},
 	}
 }
@@ -116,8 +125,6 @@ func applyEnvOverrides(cfg *config) {
 	cfg.ListenAddr = envOrDefault("LISTEN_ADDR", cfg.ListenAddr)
 	cfg.CertFile = envOrDefault("TLS_CERT_FILE", cfg.CertFile)
 	cfg.KeyFile = envOrDefault("TLS_KEY_FILE", cfg.KeyFile)
-	cfg.Upstream = envOrDefault("UPSTREAM_BASE_URL", cfg.Upstream)
-	cfg.UpstreamHost = envOrDefault("UPSTREAM_BASE_HOST", cfg.UpstreamHost)
 }
 
 func validateConfig(cfg config) error {
@@ -130,49 +137,64 @@ func validateConfig(cfg config) error {
 	if strings.TrimSpace(cfg.KeyFile) == "" {
 		return errors.New("tls_key_file is required")
 	}
-	if strings.TrimSpace(cfg.Upstream) == "" {
-		return errors.New("upstream_base_url is required")
-	}
-	upstreamURL, err := url.Parse(cfg.Upstream)
-	if err != nil {
-		return err
-	}
-	if upstreamURL.Scheme == "" || upstreamURL.Host == "" {
-		return errors.New("upstream_base_url must be a valid absolute URL")
-	}
-	if cfg.UpstreamHost != "" {
-		if strings.Contains(cfg.UpstreamHost, "://") {
-			return errors.New("upstream_base_host must be a host, not a URL")
-		}
-		if strings.TrimSpace(cfg.UpstreamHost) == "" {
-			return errors.New("upstream_base_host must not be empty")
-		}
-	}
 	if cfg.RetryMax < 0 {
 		return errors.New("retry_max must be greater than or equal to 0")
 	}
-	if len(cfg.Routes) == 0 {
-		return errors.New("at least one route is required")
+	if len(cfg.Upstreams) == 0 {
+		return errors.New("at least one upstream is required")
 	}
 
-	seenPaths := make(map[string]struct{}, len(cfg.Routes))
-	for _, route := range cfg.Routes {
-		if strings.TrimSpace(route.Path) == "" {
-			return errors.New("route.path is required")
+	seenHosts := make(map[string]struct{}, len(cfg.Upstreams))
+	for i, upstream := range cfg.Upstreams {
+		if strings.TrimSpace(upstream.Host) == "" {
+			return fmt.Errorf("upstreams[%d].host is required", i)
 		}
-		if strings.TrimSpace(route.TargetPath) == "" {
-			return errors.New("route.target_path is required")
+		if _, exists := seenHosts[upstream.Host]; exists {
+			return fmt.Errorf("duplicate upstream host: %s", upstream.Host)
 		}
-		if !strings.HasPrefix(route.Path, "/") {
-			return errors.New("route.path must start with /")
+		seenHosts[upstream.Host] = struct{}{}
+
+		if strings.TrimSpace(upstream.BaseURL) == "" {
+			return fmt.Errorf("upstreams[%d].base_url is required", i)
 		}
-		if !strings.HasPrefix(route.TargetPath, "/") {
-			return errors.New("route.target_path must start with /")
+		upstreamURL, err := url.Parse(upstream.BaseURL)
+		if err != nil {
+			return fmt.Errorf("upstreams[%d].base_url: %w", i, err)
 		}
-		if _, exists := seenPaths[route.Path]; exists {
-			return errors.New("duplicate route.path: " + route.Path)
+		if upstreamURL.Scheme == "" || upstreamURL.Host == "" {
+			return fmt.Errorf("upstreams[%d].base_url must be a valid absolute URL", i)
 		}
-		seenPaths[route.Path] = struct{}{}
+		if upstream.BaseHost != "" {
+			if strings.Contains(upstream.BaseHost, "://") {
+				return fmt.Errorf("upstreams[%d].base_host must be a host, not a URL", i)
+			}
+			if strings.TrimSpace(upstream.BaseHost) == "" {
+				return fmt.Errorf("upstreams[%d].base_host must not be empty", i)
+			}
+		}
+		if len(upstream.Routes) == 0 {
+			return fmt.Errorf("upstreams[%d].routes: at least one route is required", i)
+		}
+
+		seenPaths := make(map[string]struct{}, len(upstream.Routes))
+		for j, route := range upstream.Routes {
+			if strings.TrimSpace(route.Path) == "" {
+				return fmt.Errorf("upstreams[%d].routes[%d].path is required", i, j)
+			}
+			if strings.TrimSpace(route.TargetPath) == "" {
+				return fmt.Errorf("upstreams[%d].routes[%d].target_path is required", i, j)
+			}
+			if !strings.HasPrefix(route.Path, "/") {
+				return fmt.Errorf("upstreams[%d].routes[%d].path must start with /", i, j)
+			}
+			if !strings.HasPrefix(route.TargetPath, "/") {
+				return fmt.Errorf("upstreams[%d].routes[%d].target_path must start with /", i, j)
+			}
+			if _, exists := seenPaths[route.Path]; exists {
+				return fmt.Errorf("upstreams[%d].routes: duplicate path: %s", i, route.Path)
+			}
+			seenPaths[route.Path] = struct{}{}
+		}
 	}
 
 	return nil
@@ -186,21 +208,18 @@ func envOrDefault(name, fallback string) string {
 	return fallback
 }
 
-type route struct {
-	Path  string
-	Proxy *httputil.ReverseProxy
-}
-
 func main() {
 	opts := parseFlags(os.Args[1:])
 	cfg, err := loadConfig(opts.ConfigFile)
 	if err != nil {
-		log.Fatalf("load config: %v", err)
+		slog.Error("load config failed", "error", err)
+		os.Exit(1)
 	}
 
 	handler, err := newHandler(cfg, opts.Debug)
 	if err != nil {
-		log.Fatalf("build handler: %v", err)
+		slog.Error("build handler failed", "error", err)
+		os.Exit(1)
 	}
 
 	server := &http.Server{
@@ -209,33 +228,46 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	log.Printf("[listening] : %s", cfg.ListenAddr)
-	log.Printf("[proxying] : %s", cfg.Upstream)
+	slog.Info("listening", "addr", cfg.ListenAddr)
+	for _, upstream := range cfg.Upstreams {
+		slog.Info("upstream configured", "host", upstream.Host, "base_url", upstream.BaseURL)
+	}
 	if opts.Debug {
-		log.Printf("debug mode enabled, request dumps will be written to %s", defaultLogsDir)
+		slog.Info("debug mode enabled", "logs_dir", defaultLogsDir)
 	}
 	if err := server.ListenAndServeTLS(cfg.CertFile, cfg.KeyFile); err != nil {
-		log.Fatalf("listen tls: %v", err)
+		slog.Error("listen tls failed", "error", err)
+		os.Exit(1)
 	}
 }
 
 func newHandler(cfg config, debug bool) (http.Handler, error) {
-	target, err := url.Parse(cfg.Upstream)
-	if err != nil {
-		return nil, err
+	type hostRoute struct {
+		Path  string
+		Proxy *httputil.ReverseProxy
 	}
 
-	upstreamHost := target.Host
-	if cfg.UpstreamHost != "" {
-		upstreamHost = cfg.UpstreamHost
-	}
+	hostRoutes := make(map[string][]hostRoute)
 
-	routes := make([]route, 0, len(cfg.Routes))
-	for _, item := range cfg.Routes {
-		routes = append(routes, route{
-			Path:  item.Path,
-			Proxy: newRouteProxy(target, upstreamHost, item.TargetPath, cfg.Transport, cfg.RetryMax),
-		})
+	for _, upstream := range cfg.Upstreams {
+		target, err := url.Parse(upstream.BaseURL)
+		if err != nil {
+			return nil, fmt.Errorf("upstream %s: %w", upstream.Host, err)
+		}
+
+		upstreamHost := target.Host
+		if upstream.BaseHost != "" {
+			upstreamHost = upstream.BaseHost
+		}
+
+		routes := make([]hostRoute, 0, len(upstream.Routes))
+		for _, item := range upstream.Routes {
+			routes = append(routes, hostRoute{
+				Path:  item.Path,
+				Proxy: newRouteProxy(target, upstreamHost, item.TargetPath, cfg.Transport, cfg.RetryMax),
+			})
+		}
+		hostRoutes[upstream.Host] = routes
 	}
 
 	mux := http.NewServeMux()
@@ -244,14 +276,25 @@ func newHandler(cfg config, debug bool) (http.Handler, error) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 
-	for _, item := range routes {
-		routeItem := item
-		mux.Handle(routeItem.Path, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			routeItem.Proxy.ServeHTTP(w, r)
-		}))
-	}
-
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		host := r.Host
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+
+		routes, ok := hostRoutes[host]
+		if !ok {
+			writeJSONError(w, http.StatusNotFound, "unknown host")
+			return
+		}
+
+		for _, rt := range routes {
+			if r.URL.Path == rt.Path {
+				rt.Proxy.ServeHTTP(w, r)
+				return
+			}
+		}
+
 		writeJSONError(w, http.StatusNotFound, "unsupported path")
 	})
 
@@ -281,7 +324,12 @@ func newRouteProxy(target *url.URL, upstreamHost, targetPath string, transport h
 	}
 
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		log.Printf("proxy error: method=%s path=%s err=%v", r.Method, r.URL.Path, err)
+		slog.Error("proxy request failed",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"host", r.Host,
+			"error", err,
+		)
 		writeJSONError(w, http.StatusBadGateway, "upstream request failed")
 	}
 
@@ -329,7 +377,13 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, roundTripErr
 		}
 
-		log.Printf("retry upstream request: method=%s path=%s attempt=%d/%d err=%v", req.Method, req.URL.Path, attempt, attempts, roundTripErr)
+		slog.Warn("retrying upstream request",
+			"method", req.Method,
+			"path", req.URL.Path,
+			"attempt", attempt,
+			"max_attempts", attempts,
+			"error", roundTripErr,
+		)
 	}
 
 	return nil, errors.New("unreachable retry state")
@@ -392,7 +446,13 @@ func loggingMiddleware(next http.Handler) http.Handler {
 		start := time.Now()
 		wrapped := &statusRecorder{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(wrapped, r)
-		log.Printf("request completed: method=%s path=%s status=%d duration=%s", r.Method, r.URL.Path, wrapped.statusCode, time.Since(start))
+		slog.Info("request completed",
+			"method", r.Method,
+			"host", r.Host,
+			"path", r.URL.Path,
+			"status", wrapped.statusCode,
+			"duration", time.Since(start).String(),
+		)
 	})
 }
 
@@ -420,7 +480,11 @@ func debugMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		payload, err := dumpRequest(r)
 		if err != nil {
-			log.Printf("dump request error: method=%s path=%s err=%v", r.Method, r.URL.Path, err)
+			slog.Error("dump request failed",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"error", err,
+			)
 		} else {
 			go writeDebugRequest(payload)
 		}
@@ -444,12 +508,12 @@ func dumpRequest(r *http.Request) ([]byte, error) {
 
 func writeDebugRequest(payload []byte) {
 	if err := os.MkdirAll(defaultLogsDir, 0o755); err != nil {
-		log.Printf("create debug log dir error: err=%v", err)
+		slog.Error("create debug log dir failed", "error", err)
 		return
 	}
 
 	filePath := filepath.Join(defaultLogsDir, fmt.Sprintf("request_%d.txt", time.Now().UnixNano()))
 	if err := os.WriteFile(filePath, payload, 0o600); err != nil {
-		log.Printf("write debug request error: path=%s err=%v", filePath, err)
+		slog.Error("write debug request failed", "path", filePath, "error", err)
 	}
 }

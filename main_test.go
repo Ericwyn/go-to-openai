@@ -40,8 +40,13 @@ func TestChatCompletionsProxy(t *testing.T) {
 
 	requests := make(chan capturedRequest, 1)
 	handler := newTestHandler(t, config{
-		Upstream: defaultUpstream,
-		Routes:   defaultConfig().Routes,
+		Upstreams: []upstreamConfig{
+			{
+				Host:    "api.openai.com",
+				BaseURL: "http://api.openai.com",
+				Routes:  defaultConfig().Upstreams[0].Routes,
+			},
+		},
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			body, err := io.ReadAll(r.Body)
 			if err != nil {
@@ -134,8 +139,13 @@ func TestModelsProxy(t *testing.T) {
 
 	requests := make(chan capturedRequest, 1)
 	handler := newTestHandler(t, config{
-		Upstream: defaultUpstream,
-		Routes:   defaultConfig().Routes,
+		Upstreams: []upstreamConfig{
+			{
+				Host:    "api.openai.com",
+				BaseURL: "http://api.openai.com",
+				Routes:  defaultConfig().Upstreams[0].Routes,
+			},
+		},
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			requests <- capturedRequest{
 				Method:        r.Method,
@@ -193,8 +203,13 @@ func TestResponsesProxy(t *testing.T) {
 
 	requests := make(chan string, 1)
 	handler := newTestHandler(t, config{
-		Upstream: defaultUpstream,
-		Routes:   defaultConfig().Routes,
+		Upstreams: []upstreamConfig{
+			{
+				Host:    "api.openai.com",
+				BaseURL: "http://api.openai.com",
+				Routes:  defaultConfig().Upstreams[0].Routes,
+			},
+		},
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			requests <- r.URL.Path
 			return &http.Response{
@@ -235,9 +250,14 @@ func TestCustomRouteConfig(t *testing.T) {
 
 	requests := make(chan string, 1)
 	handler := newTestHandler(t, config{
-		Upstream: defaultUpstream,
-		Routes: []routeConfig{
-			{Path: "/v1/embeddings", TargetPath: "/openai/embeddings"},
+		Upstreams: []upstreamConfig{
+			{
+				Host:    "api.openai.com",
+				BaseURL: "http://api.openai.com",
+				Routes: []routeConfig{
+					{Path: "/v1/embeddings", TargetPath: "/openai/embeddings"},
+				},
+			},
 		},
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			requests <- r.URL.Path
@@ -275,9 +295,14 @@ func TestProxyUsesConfiguredUpstreamHost(t *testing.T) {
 
 	requests := make(chan capturedRequest, 1)
 	handler := newTestHandler(t, config{
-		Upstream:     "http://127.0.0.1:8080",
-		UpstreamHost: "proxy.example.com",
-		Routes:       defaultConfig().Routes,
+		Upstreams: []upstreamConfig{
+			{
+				Host:     "api.openai.com",
+				BaseURL:  "http://127.0.0.1:8080",
+				BaseHost: "proxy.example.com",
+				Routes:   defaultConfig().Upstreams[0].Routes,
+			},
+		},
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			requests <- capturedRequest{
 				Host:       r.Host,
@@ -305,6 +330,112 @@ func TestProxyUsesConfiguredUpstreamHost(t *testing.T) {
 	}
 	if captured.HeaderHost != "proxy.example.com" {
 		t.Fatalf("header host = %s", captured.HeaderHost)
+	}
+}
+
+func TestMultiUpstreamRouting(t *testing.T) {
+	t.Parallel()
+
+	type capturedRequest struct {
+		Host string
+		Path string
+	}
+
+	requests := make(chan capturedRequest, 2)
+	handler := newTestHandler(t, config{
+		Upstreams: []upstreamConfig{
+			{
+				Host:    "api.openai.com",
+				BaseURL: "http://openai-backend.local",
+				Routes: []routeConfig{
+					{Path: "/v1/chat/completions", TargetPath: "/v1/chat/completions"},
+				},
+			},
+			{
+				Host:    "api.anthropic.com",
+				BaseURL: "http://anthropic-backend.local",
+				Routes: []routeConfig{
+					{Path: "/v1/messages", TargetPath: "/v1/messages"},
+				},
+			},
+		},
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			requests <- capturedRequest{
+				Host: r.Host,
+				Path: r.URL.Path,
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			}, nil
+		}),
+	}, false)
+
+	req1, err := http.NewRequest(http.MethodPost, "https://api.openai.com/v1/chat/completions", bytes.NewBufferString(`{}`))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	recorder1 := httptest.NewRecorder()
+	handler.ServeHTTP(recorder1, req1)
+
+	req2, err := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", bytes.NewBufferString(`{}`))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	recorder2 := httptest.NewRecorder()
+	handler.ServeHTTP(recorder2, req2)
+
+	captured1 := <-requests
+	if captured1.Host != "openai-backend.local" {
+		t.Fatalf("openai host = %s", captured1.Host)
+	}
+	if captured1.Path != "/v1/chat/completions" {
+		t.Fatalf("openai path = %s", captured1.Path)
+	}
+
+	captured2 := <-requests
+	if captured2.Host != "anthropic-backend.local" {
+		t.Fatalf("anthropic host = %s", captured2.Host)
+	}
+	if captured2.Path != "/v1/messages" {
+		t.Fatalf("anthropic path = %s", captured2.Path)
+	}
+}
+
+func TestUnknownHost(t *testing.T) {
+	t.Parallel()
+
+	handler := newTestHandler(t, config{
+		Upstreams: []upstreamConfig{
+			{
+				Host:    "api.openai.com",
+				BaseURL: "http://api.openai.com",
+				Routes: []routeConfig{
+					{Path: "/v1/models", TargetPath: "/v1/models"},
+				},
+			},
+		},
+	}, false)
+
+	recorder := httptest.NewRecorder()
+	req, err := http.NewRequest(http.MethodGet, "https://unknown.example.com/v1/models", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+
+	handler.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+
+	var payload map[string]map[string]string
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if payload["error"]["message"] != "unknown host" {
+		t.Fatalf("message = %s", payload["error"]["message"])
 	}
 }
 
@@ -552,13 +683,15 @@ func TestLoadConfigFromJSONAndEnvOverride(t *testing.T) {
 		"listen_addr": ":8443",
 		"tls_cert_file": "./custom.crt",
 		"tls_key_file": "./custom.key",
-		"upstream_base_url": "http://json-upstream.test",
-		"upstream_base_host": "json-host.test",
 		"retry_max": 2,
-		"routes": [
+		"upstreams": [
 			{
-				"path": "/v1/embeddings",
-				"target_path": "/openai/embeddings"
+				"host": "api.openai.com",
+				"base_url": "http://json-upstream.test",
+				"base_host": "json-host.test",
+				"routes": [
+					{"path": "/v1/embeddings", "target_path": "/openai/embeddings"}
+				]
 			}
 		]
 	}`
@@ -566,15 +699,14 @@ func TestLoadConfigFromJSONAndEnvOverride(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	t.Setenv("UPSTREAM_BASE_URL", "http://env-upstream.test")
-	t.Setenv("UPSTREAM_BASE_HOST", "env-host.test")
+	t.Setenv("LISTEN_ADDR", ":9443")
 
 	cfg, err := loadConfig(configPath)
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
 
-	if cfg.ListenAddr != ":8443" {
+	if cfg.ListenAddr != ":9443" {
 		t.Fatalf("listen addr = %s", cfg.ListenAddr)
 	}
 	if cfg.CertFile != "./custom.crt" {
@@ -583,23 +715,29 @@ func TestLoadConfigFromJSONAndEnvOverride(t *testing.T) {
 	if cfg.KeyFile != "./custom.key" {
 		t.Fatalf("key file = %s", cfg.KeyFile)
 	}
-	if cfg.Upstream != "http://env-upstream.test" {
-		t.Fatalf("upstream = %s", cfg.Upstream)
-	}
-	if cfg.UpstreamHost != "env-host.test" {
-		t.Fatalf("upstream host = %s", cfg.UpstreamHost)
-	}
 	if cfg.RetryMax != 2 {
 		t.Fatalf("retry max = %d", cfg.RetryMax)
 	}
-	if len(cfg.Routes) != 1 {
-		t.Fatalf("routes len = %d", len(cfg.Routes))
+	if len(cfg.Upstreams) != 1 {
+		t.Fatalf("upstreams len = %d", len(cfg.Upstreams))
 	}
-	if cfg.Routes[0].Path != "/v1/embeddings" {
-		t.Fatalf("route path = %s", cfg.Routes[0].Path)
+	if cfg.Upstreams[0].Host != "api.openai.com" {
+		t.Fatalf("upstream host = %s", cfg.Upstreams[0].Host)
 	}
-	if cfg.Routes[0].TargetPath != "/openai/embeddings" {
-		t.Fatalf("route target path = %s", cfg.Routes[0].TargetPath)
+	if cfg.Upstreams[0].BaseURL != "http://json-upstream.test" {
+		t.Fatalf("upstream base url = %s", cfg.Upstreams[0].BaseURL)
+	}
+	if cfg.Upstreams[0].BaseHost != "json-host.test" {
+		t.Fatalf("upstream base host = %s", cfg.Upstreams[0].BaseHost)
+	}
+	if len(cfg.Upstreams[0].Routes) != 1 {
+		t.Fatalf("routes len = %d", len(cfg.Upstreams[0].Routes))
+	}
+	if cfg.Upstreams[0].Routes[0].Path != "/v1/embeddings" {
+		t.Fatalf("route path = %s", cfg.Upstreams[0].Routes[0].Path)
+	}
+	if cfg.Upstreams[0].Routes[0].TargetPath != "/openai/embeddings" {
+		t.Fatalf("route target path = %s", cfg.Upstreams[0].Routes[0].TargetPath)
 	}
 }
 
@@ -607,8 +745,13 @@ func TestUnsupportedPath(t *testing.T) {
 	t.Parallel()
 
 	handler := newTestHandler(t, config{
-		Upstream: defaultUpstream,
-		Routes:   defaultConfig().Routes,
+		Upstreams: []upstreamConfig{
+			{
+				Host:    "api.openai.com",
+				BaseURL: "http://api.openai.com",
+				Routes:  defaultConfig().Upstreams[0].Routes,
+			},
+		},
 	}, false)
 	recorder := httptest.NewRecorder()
 	req, err := http.NewRequest(http.MethodGet, "https://api.openai.com/v1/unknown", nil)
@@ -634,14 +777,11 @@ func TestUnsupportedPath(t *testing.T) {
 func newTestHandler(t *testing.T, cfg config, debug bool) http.Handler {
 	t.Helper()
 
-	if cfg.Upstream == "" {
-		cfg.Upstream = defaultUpstream
-	}
 	if cfg.RetryMax == 0 {
 		cfg.RetryMax = defaultRetryMax
 	}
-	if len(cfg.Routes) == 0 {
-		cfg.Routes = defaultConfig().Routes
+	if len(cfg.Upstreams) == 0 {
+		cfg.Upstreams = defaultConfig().Upstreams
 	}
 
 	handler, err := newHandler(cfg, debug)
