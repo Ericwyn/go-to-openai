@@ -42,7 +42,7 @@ jobs:
           if [ "${{ matrix.goos }}" = "windows" ]; then
             BINARY_NAME="${BINARY_NAME}.exe"
           fi
-          go build -ldflags="-s -w -X main.version=${{ steps.version.outputs.version }}" -o "$BINARY_NAME" .
+          go build -ldflags "-s -w -X 'main.version=${{ steps.version.outputs.version }}'" -o "$BINARY_NAME" .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
