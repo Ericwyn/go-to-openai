@@ -9,6 +9,7 @@ import (
 
 	"github.com/ericwyn/go-to-openai/certmanager"
 	"github.com/ericwyn/go-to-openai/config"
+	"github.com/ericwyn/go-to-openai/hostsmanager"
 	"github.com/ericwyn/go-to-openai/proxy"
 )
 
@@ -38,6 +39,10 @@ func main() {
 		handleRootCrtRemove(args)
 	case "domain-crt-gen", "-domain-crt-gen":
 		handleDomainCrtGen(args)
+	case "hosts-setup", "-hosts-setup":
+		handleHostsSetup(args)
+	case "hosts-remove", "-hosts-remove":
+		handleHostsRemove(args)
 	case "run", "-run":
 		handleRun(args)
 	default:
@@ -55,6 +60,8 @@ Commands:
   root-crt-install      Install root CA certificate to system trust store
   root-crt-remove       Remove root CA certificate from system trust store
   domain-crt-gen        Generate domain certificate signed by root CA
+  hosts-setup           Add domain entries to hosts file
+  hosts-remove          Remove go-to-openai entries from hosts file
   run                   Start HTTPS proxy server
 
 Options:
@@ -65,6 +72,9 @@ Examples:
   go-to-openai root-crt-install
   go-to-openai root-crt-remove
   go-to-openai domain-crt-gen api.openai.com
+  go-to-openai hosts-setup api.openai.com api.anthropic.com
+  go-to-openai hosts-setup -ip 127.0.0.1 api.openai.com
+  go-to-openai hosts-remove
   go-to-openai run -config=./config.json`)
 }
 
@@ -75,6 +85,8 @@ func handleRootCrtGen(args []string) {
 	caDays := flagSet.Int("ca-days", 3650, "CA certificate validity in days")
 	outputDir := flagSet.String("output-dir", "./cert", "certificate output directory")
 	_ = flagSet.Parse(args)
+
+	*outputDir = filepath.Clean(*outputDir)
 
 	if err := certmanager.GenerateRootCA(*caCN, *caOrg, *caDays, *outputDir); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to generate root CA: %v\n", err)
@@ -93,6 +105,8 @@ func handleRootCrtInstall(args []string) {
 	certPath := flagSet.String("cert-path", filepath.Join("./cert", certmanager.DefaultRootCAName+".crt"), "root CA certificate path")
 	_ = flagSet.Parse(args)
 
+	*certPath = filepath.Clean(*certPath)
+
 	if err := certmanager.Install(*certPath); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to install root CA: %v\n", err)
 		os.Exit(1)
@@ -105,6 +119,8 @@ func handleRootCrtRemove(args []string) {
 	flagSet := flag.NewFlagSet("root-crt-remove", flag.ExitOnError)
 	certPath := flagSet.String("cert-path", filepath.Join("./cert", certmanager.DefaultRootCAName+".crt"), "root CA certificate path")
 	_ = flagSet.Parse(args)
+
+	*certPath = filepath.Clean(*certPath)
 
 	if err := certmanager.Remove(*certPath); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to remove root CA: %v\n", err)
@@ -129,6 +145,10 @@ func handleDomainCrtGen(args []string) {
 	outputDir := flagSet.String("output-dir", "./cert", "certificate output directory")
 	_ = flagSet.Parse(args[1:])
 
+	*rootCACert = filepath.Clean(*rootCACert)
+	*rootCAKey = filepath.Clean(*rootCAKey)
+	*outputDir = filepath.Clean(*outputDir)
+
 	if err := certmanager.GenerateDomainCert(domain, *rootCACert, *rootCAKey, *serverDays, *outputDir); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to generate domain certificate: %v\n", err)
 		os.Exit(1)
@@ -147,6 +167,8 @@ func handleRun(args []string) {
 	debug := flagSet.Bool("debug", false, "enable debug request logging")
 	_ = flagSet.Parse(args)
 
+	*configFile = filepath.Clean(*configFile)
+
 	cfg, err := config.Load(*configFile)
 	if err != nil {
 		slog.Error("load config failed", "error", err)
@@ -157,4 +179,39 @@ func handleRun(args []string) {
 		slog.Error("run proxy failed", "error", err)
 		os.Exit(1)
 	}
+}
+
+func handleHostsSetup(args []string) {
+	flagSet := flag.NewFlagSet("hosts-setup", flag.ExitOnError)
+	targetIP := flagSet.String("ip", "127.0.0.1", "target IP address for hosts entries")
+	_ = flagSet.Parse(args)
+
+	domains := flagSet.Args()
+	if len(domains) == 0 {
+		fmt.Fprintf(os.Stderr, "at least one domain is required\n")
+		fmt.Fprintf(os.Stderr, "Usage: go-to-openai hosts-setup [-ip <ip>] <domain1> [domain2] ...\n")
+		os.Exit(1)
+	}
+
+	if err := hostsmanager.Setup(domains, *targetIP); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to setup hosts: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("hosts entries added successfully:\n")
+	for _, domain := range domains {
+		fmt.Printf("  %s -> %s\n", domain, *targetIP)
+	}
+}
+
+func handleHostsRemove(args []string) {
+	flagSet := flag.NewFlagSet("hosts-remove", flag.ExitOnError)
+	_ = flagSet.Parse(args)
+
+	if err := hostsmanager.Remove(); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to remove hosts: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("go-to-openai hosts entries removed successfully")
 }

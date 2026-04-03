@@ -34,8 +34,8 @@ type RouteConfig struct {
 func Default() Config {
 	return Config{
 		ListenAddr: ":443",
-		CertFile:   "./cert/api.openai.com.crt",
-		KeyFile:    "./cert/api.openai.com.key",
+		CertFile:   NormalizePath("./cert/api.openai.com.crt"),
+		KeyFile:    NormalizePath("./cert/api.openai.com.key"),
 		RetryMax:   3,
 		Upstreams: []UpstreamConfig{
 			{
@@ -57,6 +57,9 @@ func Load(configFile string) (Config, error) {
 	if err := mergeJSONConfig(&cfg, configFile); err != nil {
 		return Config{}, err
 	}
+
+	cfg.CertFile = NormalizePath(cfg.CertFile)
+	cfg.KeyFile = NormalizePath(cfg.KeyFile)
 
 	applyEnvOverrides(&cfg)
 
@@ -89,8 +92,8 @@ func mergeJSONConfig(cfg *Config, filePath string) error {
 
 func applyEnvOverrides(cfg *Config) {
 	cfg.ListenAddr = envOrDefault("LISTEN_ADDR", cfg.ListenAddr)
-	cfg.CertFile = envOrDefault("TLS_CERT_FILE", cfg.CertFile)
-	cfg.KeyFile = envOrDefault("TLS_KEY_FILE", cfg.KeyFile)
+	cfg.CertFile = NormalizePath(envOrDefault("TLS_CERT_FILE", cfg.CertFile))
+	cfg.KeyFile = NormalizePath(envOrDefault("TLS_KEY_FILE", cfg.KeyFile))
 }
 
 func validateConfig(cfg Config) error {
