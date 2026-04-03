@@ -14,7 +14,7 @@ import (
 	"github.com/ericwyn/go-to-openai/proxy"
 )
 
-var version = "v1.0.0 260403"
+var version = "v1.1.0 260404"
 
 func main() {
 	if len(os.Args) < 2 {
