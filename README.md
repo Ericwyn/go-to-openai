@@ -42,7 +42,35 @@ go-to-openai/
 go build -o go-to-openai .
 ```
 
-### 1. 生成根证书
+### 方式一：Auto 交互式模式（推荐）
+
+Auto 模式提供交互式菜单，一键完成所有配置和启动：
+
+```bash
+sudo ./go-to-openai auto
+```
+
+菜单选项：
+
+```
+欢迎使用 goto-openai, 请输入数字进行操作
+1. 生成根证书
+2. 安装根证书
+3. 卸载根证书
+4. 生成域名证书
+5. 生成配置文件
+6. 添加hosts配置
+7. 删除hosts
+8. 配置检查
+9. 一键启动
+0. 退出
+```
+
+详细说明请参考 [Auto 模式使用说明](/docs/auto/使用说明.md)
+
+### 方式二：手动命令方式
+
+#### 1. 生成根证书
 
 ```bash
 ./go-to-openai root-crt-gen
@@ -53,7 +81,7 @@ go build -o go-to-openai .
 - `cert/goto-openai-root.crt` - 根 CA 证书
 - `cert/goto-openai-root.key` - 根 CA 私钥
 
-### 2. 安装根证书到系统信任存储
+#### 2. 安装根证书到系统信任存储
 
 ```bash
 sudo ./go-to-openai root-crt-install
@@ -66,7 +94,7 @@ sudo ./go-to-openai root-crt-install
 - **macOS**: 使用 `security` 命令安装到系统钥匙串
 - **Windows**: 使用 `certutil` 安装到本地计算机信任存储（需要管理员权限）
 
-### 3. 生成域名证书
+#### 3. 生成域名证书
 
 为每个需要代理的域名生成独立的证书：
 
@@ -80,7 +108,7 @@ sudo ./go-to-openai root-crt-install
 - `cert/goto-openai-dm-api.openai.com.crt` - 域名证书
 - `cert/goto-openai-dm-api.openai.com.key` - 域名私钥
 
-### 4. 启动代理服务
+#### 4. 启动代理服务
 
 ```bash
 sudo ./go-to-openai run -config="./config.json"

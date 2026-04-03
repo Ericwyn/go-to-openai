@@ -84,6 +84,14 @@ func Setup(domains []string, targetIP string) error {
 	return writeHostsFile([]byte(newContent))
 }
 
+func ReadHostsContent() (string, error) {
+	data, err := readHostsFile()
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
 func Remove() error {
 	content, err := readHostsFile()
 	if err != nil {

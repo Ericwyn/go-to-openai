@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/ericwyn/go-to-openai/auto"
 	"github.com/ericwyn/go-to-openai/certmanager"
 	"github.com/ericwyn/go-to-openai/config"
 	"github.com/ericwyn/go-to-openai/hostsmanager"
@@ -31,6 +32,10 @@ func main() {
 	args := os.Args[2:]
 
 	switch command {
+	case "auto", "-auto":
+		handleAuto(args)
+	case "autostart", "-autostart":
+		handleAutoStart(args)
 	case "root-crt-gen", "-root-crt-gen":
 		handleRootCrtGen(args)
 	case "root-crt-install", "-root-crt-install":
@@ -56,6 +61,8 @@ func printUsage() {
 	fmt.Println(`Usage: go-to-openai <command> [options]
 
 Commands:
+  auto                  Interactive auto mode (requires admin/root privileges)
+  autostart             One-key start proxy (requires admin/root privileges)
   root-crt-gen          Generate root CA certificate
   root-crt-install      Install root CA certificate to system trust store
   root-crt-remove       Remove root CA certificate from system trust store
@@ -68,6 +75,8 @@ Options:
   -v, --version         Print version information
 
 Examples:
+  go-to-openai auto
+  go-to-openai autostart
   go-to-openai root-crt-gen
   go-to-openai root-crt-install
   go-to-openai root-crt-remove
@@ -214,4 +223,18 @@ func handleHostsRemove(args []string) {
 	}
 
 	fmt.Println("go-to-openai hosts entries removed successfully")
+}
+
+func handleAuto(_ []string) {
+	if err := auto.RunAutoMode(); err != nil {
+		fmt.Fprintf(os.Stderr, "auto mode failed: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func handleAutoStart(_ []string) {
+	if err := auto.OneKeyStart(); err != nil {
+		fmt.Fprintf(os.Stderr, "autostart failed: %v\n", err)
+		os.Exit(1)
+	}
 }
