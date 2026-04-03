@@ -29,8 +29,8 @@ go-to-openai/
 127.0.0.1 api.anthropic.com
 ```
 
-2. 系统信任生成的 CA 证书
-3. 本机 `443` 端口可用
+1. 系统信任生成的 CA 证书
+2. 本机 `443` 端口可用
 
 > Linux/macOS 监听 `443` 往往需要 `root` 或额外授权。
 
@@ -98,12 +98,12 @@ sudo ./go-to-openai run -config="./config.json"
 
 选项：
 
-| 选项 | 说明 | 默认值 |
-|---|---|---|
-| `--ca-cn` | CA 通用名称 | `Go-To-OpenAI Root CA` |
-| `--ca-org` | CA 组织名称 | `Go-To-OpenAI` |
-| `--ca-days` | 证书有效期（天） | `3650` |
-| `--output-dir` | 输出目录 | `./cert` |
+| 选项             | 说明       | 默认值                    |
+| -------------- | -------- | ---------------------- |
+| `--ca-cn`      | CA 通用名称  | `Go-To-OpenAI Root CA` |
+| `--ca-org`     | CA 组织名称  | `Go-To-OpenAI`         |
+| `--ca-days`    | 证书有效期（天） | `3650`                 |
+| `--output-dir` | 输出目录     | `./cert`               |
 
 ### root-crt-install
 
@@ -115,8 +115,8 @@ sudo ./go-to-openai root-crt-install [options]
 
 选项：
 
-| 选项 | 说明 | 默认值 |
-|---|---|---|
+| 选项            | 说明    | 默认值                           |
+| ------------- | ----- | ----------------------------- |
 | `--cert-path` | 根证书路径 | `./cert/goto-openai-root.crt` |
 
 ### domain-crt-gen
@@ -129,12 +129,12 @@ sudo ./go-to-openai root-crt-install [options]
 
 选项：
 
-| 选项 | 说明 | 默认值 |
-|---|---|---|
-| `--root-ca-cert` | 根证书路径 | `./cert/goto-openai-root.crt` |
-| `--root-ca-key` | 根私钥路径 | `./cert/goto-openai-root.key` |
-| `--server-days` | 证书有效期（天） | `825` |
-| `--output-dir` | 输出目录 | `./cert` |
+| 选项               | 说明       | 默认值                           |
+| ---------------- | -------- | ----------------------------- |
+| `--root-ca-cert` | 根证书路径    | `./cert/goto-openai-root.crt` |
+| `--root-ca-key`  | 根私钥路径    | `./cert/goto-openai-root.key` |
+| `--server-days`  | 证书有效期（天） | `825`                         |
+| `--output-dir`   | 输出目录     | `./cert`                      |
 
 ### run
 
@@ -146,10 +146,10 @@ sudo ./go-to-openai run [options]
 
 选项：
 
-| 选项 | 说明 | 默认值 |
-|---|---|---|
+| 选项        | 说明     | 默认值             |
+| --------- | ------ | --------------- |
 | `-config` | 配置文件路径 | `./config.json` |
-| `-debug` | 开启调试模式 | `false` |
+| `-debug`  | 开启调试模式 | `false`         |
 
 ## 配置
 
@@ -190,37 +190,37 @@ sudo ./go-to-openai run [options]
 
 ### 配置字段说明
 
-| 字段 | 说明 |
-|---|---|
-| `listen_addr` | HTTPS 监听地址，默认 `:443` |
-| `tls_cert_file` | TLS 证书路径 |
-| `tls_key_file` | TLS 私钥路径 |
-| `retry_max` | 网络错误时的最大重试次数，默认 `3` |
-| `upstreams` | 上游配置数组，至少需要一个 |
+| 字段              | 说明                   |
+| --------------- | -------------------- |
+| `listen_addr`   | HTTPS 监听地址，默认 `:443` |
+| `tls_cert_file` | TLS 证书路径             |
+| `tls_key_file`  | TLS 私钥路径             |
+| `retry_max`     | 网络错误时的最大重试次数，默认 `3`  |
+| `upstreams`     | 上游配置数组，至少需要一个        |
 
 ### upstream 配置
 
-| 字段 | 说明 |
-|---|---|
-| `host` | 请求的 Host 头，用于匹配路由 |
-| `base_url` | 上游服务器地址 |
+| 字段          | 说明                                      |
+| ----------- | --------------------------------------- |
+| `host`      | 请求的 Host 头，用于匹配路由                       |
+| `base_url`  | 上游服务器地址                                 |
 | `base_host` | 可选，转发时设置的 Host 头，默认使用 `base_url` 的 Host |
-| `routes` | 路由规则数组 |
+| `routes`    | 路由规则数组                                  |
 
 ### route 配置
 
-| 字段 | 说明 |
-|---|---|
-| `path` | 请求路径，必须以 `/` 开头 |
+| 字段            | 说明                  |
+| ------------- | ------------------- |
+| `path`        | 请求路径，必须以 `/` 开头     |
 | `target_path` | 转发到上游的路径，必须以 `/` 开头 |
 
 ### 环境变量
 
-| 变量名 | 说明 |
-|---|---|
-| `LISTEN_ADDR` | HTTPS 监听地址 |
-| `TLS_CERT_FILE` | TLS 证书路径 |
-| `TLS_KEY_FILE` | TLS 私钥路径 |
+| 变量名             | 说明         |
+| --------------- | ---------- |
+| `LISTEN_ADDR`   | HTTPS 监听地址 |
+| `TLS_CERT_FILE` | TLS 证书路径   |
+| `TLS_KEY_FILE`  | TLS 私钥路径   |
 
 ## 验证示例
 
@@ -274,3 +274,35 @@ curl https://api.openai.com/healthz
 - 调试模式可 dump 请求内容
 - 跨平台证书安装支持（Linux/macOS/Windows）
 - 统一的 CLI 命令结构，易于使用
+
+## 常见 QA
+
+### Q: Windows 11 上使用 PowerShell 执行时遇到权限不足怎么办？
+
+A: Windows 11 上需要以管理员身份运行 PowerShell 才能执行需要系统权限的操作。
+
+**解决方案**：
+
+1. **以管理员身份运行 PowerShell**：
+   - 从开始菜单搜索 PowerShell，右键选择「以管理员身份运行」
+   - 或按 `Win + X` 选择「Windows PowerShell (管理员)」
+2. **完整启动步骤**：请参考 [Windows 11 + PowerShell 启动方案](/docs/win_qa/windows11-powershell启动方案.md) 文档
+
+<br />
+
+### Q: 在 Windows 上使用 curl 测试时遇到证书吊销状态检查错误怎么办？
+
+A: 这是 Windows 上 curl 使用 Schannel 进行 SSL/TLS 验证时的常见问题。解决方案：
+
+1. **临时解决**：使用 `--ssl-no-revoke` 参数
+   ```powershell
+   curl --ssl-no-revoke https://api.openai.com/
+   ```
+2. **永久解决**：设置环境变量
+   ```powershell
+   $env:CURL_SSL_NO_REVOKE = "1"
+   ```
+3. **详细说明**：请参考 [Windows 证书吊销状态检查](/docs/win_qa/windows证书吊销状态检查.md) 文档
+
+###
+
