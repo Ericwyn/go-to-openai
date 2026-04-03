@@ -44,11 +44,41 @@ jobs:
           fi
           go build -ldflags "-s -w -X 'main.version=${{ steps.version.outputs.version }}'" -o "$BINARY_NAME" .
 
+      - name: Prepare release package
+        run: |
+          OS="${{ matrix.goos }}"
+          ARCH="${{ matrix.goarch }}"
+          PKG_DIR="go-to-openai-${OS}-${ARCH}"
+          BINARY_NAME="go-to-openai-${OS}-${ARCH}"
+
+          mkdir -p "$PKG_DIR"
+
+          if [ "$OS" = "windows" ]; then
+            BINARY_NAME="${BINARY_NAME}.exe"
+            cp "$BINARY_NAME" "$PKG_DIR/"
+            cp run-auto-win.bat "$PKG_DIR/"
+            cp run-autostart-win.bat "$PKG_DIR/"
+          else
+            cp "$BINARY_NAME" "$PKG_DIR/"
+            cp run-auto.sh "$PKG_DIR/"
+            cp run-autostart.sh "$PKG_DIR/"
+            chmod +x "$PKG_DIR/run-auto.sh" "$PKG_DIR/run-autostart.sh"
+          fi
+
+          cp README.md "$PKG_DIR/" 2>/dev/null || true
+          cp LICENSE "$PKG_DIR/" 2>/dev/null || true
+
+          if [ "$OS" = "windows" ]; then
+            zip -r "${PKG_DIR}.zip" "$PKG_DIR"
+          else
+            zip -r "${PKG_DIR}.zip" "$PKG_DIR"
+          fi
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: go-to-openai-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: go-to-openai-${{ matrix.goos }}-${{ matrix.goarch }}*
+          path: go-to-openai-${{ matrix.goos }}-${{ matrix.goarch }}.zip
           retention-days: 30
 
   release-assets:
@@ -64,8 +94,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            go-to-openai-linux-amd64/*
-            go-to-openai-linux-arm64/*
-            go-to-openai-darwin-amd64/*
-            go-to-openai-darwin-arm64/*
-            go-to-openai-windows-amd64/*
+            go-to-openai-linux-amd64.zip
+            go-to-openai-linux-arm64.zip
+            go-to-openai-darwin-amd64.zip
+            go-to-openai-darwin-arm64.zip
+            go-to-openai-windows-amd64.zip
