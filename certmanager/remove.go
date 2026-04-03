@@ -2,6 +2,9 @@ package certmanager
 
 import (
 	"bytes"
+	"crypto/x509"
+	"encoding/pem"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -9,6 +12,24 @@ import (
 	"runtime"
 	"strings"
 )
+
+func extractCNFromPEM(certData []byte) (string, error) {
+	block, _ := pem.Decode(certData)
+	if block == nil {
+		return "", errors.New("failed to decode PEM block")
+	}
+
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return "", fmt.Errorf("parse certificate: %w", err)
+	}
+
+	if cert.Subject.CommonName != "" {
+		return cert.Subject.CommonName, nil
+	}
+
+	return "Go-To-OpenAI Root CA", nil
+}
 
 func Remove(certPath string) error {
 	if _, err := os.Stat(certPath); err != nil {
@@ -95,26 +116,9 @@ func removeRootCAMacOS(certPath string) error {
 		return fmt.Errorf("read certificate file: %w", err)
 	}
 
-	certPEM := string(certData)
-	cn := ""
-	for _, line := range strings.Split(certPEM, "\n") {
-		if strings.Contains(line, "subject=") || strings.Contains(line, "CN") {
-			if idx := strings.Index(line, "CN"); idx != -1 {
-				start := idx + 3
-				if start < len(line) {
-					end := strings.Index(line[start:], ",")
-					if end == -1 {
-						end = len(line) - start
-					}
-					cn = strings.TrimSpace(line[start : start+end])
-					break
-				}
-			}
-		}
-	}
-
-	if cn == "" {
-		cn = "Go-To-OpenAI Root CA"
+	cn, err := extractCNFromPEM(certData)
+	if err != nil {
+		return fmt.Errorf("extract CN from certificate: %w", err)
 	}
 
 	cmd := exec.Command("sudo", "security", "delete-certificate", "-c", cn,
@@ -146,26 +150,9 @@ func removeRootCAWindowsPowerShell(certPath string) error {
 		return fmt.Errorf("read certificate file: %w", err)
 	}
 
-	certPEM := string(certData)
-	cn := ""
-	for _, line := range strings.Split(certPEM, "\n") {
-		if strings.Contains(line, "subject=") || strings.Contains(line, "CN") {
-			if idx := strings.Index(line, "CN"); idx != -1 {
-				start := idx + 3
-				if start < len(line) {
-					end := strings.Index(line[start:], ",")
-					if end == -1 {
-						end = len(line) - start
-					}
-					cn = strings.TrimSpace(line[start : start+end])
-					break
-				}
-			}
-		}
-	}
-
-	if cn == "" {
-		cn = "Go-To-OpenAI Root CA"
+	cn, err := extractCNFromPEM(certData)
+	if err != nil {
+		return fmt.Errorf("extract CN from certificate: %w", err)
 	}
 
 	psCommand := fmt.Sprintf(
