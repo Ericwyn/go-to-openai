@@ -38,28 +38,24 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 0
         run: |
-          BINARY_NAME="go-to-openai-${{ matrix.goos }}-${{ matrix.goarch }}"
+          PKG_DIR="go-to-openai-${{ matrix.goos }}-${{ matrix.goarch }}"
+          BINARY_NAME="go-to-openai"
           if [ "${{ matrix.goos }}" = "windows" ]; then
             BINARY_NAME="${BINARY_NAME}.exe"
           fi
-          go build -ldflags "-s -w -X 'main.version=${{ steps.version.outputs.version }}'" -o "$BINARY_NAME" .
+          mkdir -p "$PKG_DIR"
+          go build -ldflags "-s -w -X 'main.version=${{ steps.version.outputs.version }}'" -o "$PKG_DIR/$BINARY_NAME" .
 
       - name: Prepare release package
         run: |
           OS="${{ matrix.goos }}"
           ARCH="${{ matrix.goarch }}"
           PKG_DIR="go-to-openai-${OS}-${ARCH}"
-          BINARY_NAME="go-to-openai-${OS}-${ARCH}"
-
-          mkdir -p "$PKG_DIR"
 
           if [ "$OS" = "windows" ]; then
-            BINARY_NAME="${BINARY_NAME}.exe"
-            cp "$BINARY_NAME" "$PKG_DIR/"
             cp run-auto-win.bat "$PKG_DIR/"
             cp run-autostart-win.bat "$PKG_DIR/"
           else
-            cp "$BINARY_NAME" "$PKG_DIR/"
             cp run-auto.sh "$PKG_DIR/"
             cp run-autostart.sh "$PKG_DIR/"
             chmod +x "$PKG_DIR/run-auto.sh" "$PKG_DIR/run-autostart.sh"
@@ -68,11 +64,7 @@ jobs:
           cp README.md "$PKG_DIR/" 2>/dev/null || true
           cp LICENSE "$PKG_DIR/" 2>/dev/null || true
 
-          if [ "$OS" = "windows" ]; then
-            zip -r "${PKG_DIR}.zip" "$PKG_DIR"
-          else
-            zip -r "${PKG_DIR}.zip" "$PKG_DIR"
-          fi
+          zip -r "${PKG_DIR}.zip" "$PKG_DIR"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
