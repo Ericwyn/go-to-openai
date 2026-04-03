@@ -12,6 +12,8 @@ import (
 	"github.com/ericwyn/go-to-openai/proxy"
 )
 
+var version = "v1.0.0 260403"
+
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
@@ -19,6 +21,12 @@ func main() {
 	}
 
 	command := os.Args[1]
+
+	if command == "-v" || command == "--version" {
+		fmt.Println(version)
+		os.Exit(0)
+	}
+
 	args := os.Args[2:]
 
 	switch command {
@@ -48,6 +56,9 @@ Commands:
   root-crt-remove       Remove root CA certificate from system trust store
   domain-crt-gen        Generate domain certificate signed by root CA
   run                   Start HTTPS proxy server
+
+Options:
+  -v, --version         Print version information
 
 Examples:
   go-to-openai root-crt-gen
