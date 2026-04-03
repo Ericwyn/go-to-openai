@@ -1,0 +1,70 @@
+name: Build
+
+on:
+  push:
+    branches: [main, master]
+  release:
+    types: [published]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux, windows, darwin]
+        goarch: [amd64, arm64]
+        exclude:
+          - goos: windows
+            goarch: arm64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.5'
+
+      - name: Get version
+        id: version
+        run: |
+          VERSION=$(grep -oP 'var version = "\K[^"]+' main.go)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          BINARY_NAME="go-to-openai-${{ matrix.goos }}-${{ matrix.goarch }}"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            BINARY_NAME="${BINARY_NAME}.exe"
+          fi
+          go build -ldflags="-s -w -X main.version=${{ steps.version.outputs.version }}" -o "$BINARY_NAME" .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-to-openai-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: go-to-openai-${{ matrix.goos }}-${{ matrix.goarch }}*
+          retention-days: 30
+
+  release-assets:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release'
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            go-to-openai-linux-amd64/*
+            go-to-openai-linux-arm64/*
+            go-to-openai-darwin-amd64/*
+            go-to-openai-darwin-arm64/*
+            go-to-openai-windows-amd64/*
