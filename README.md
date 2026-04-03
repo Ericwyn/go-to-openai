@@ -34,66 +34,122 @@ go-to-openai/
 
 > Linux/macOS 监听 `443` 往往需要 `root` 或额外授权。
 
-## 生成证书
+## 快速开始
 
-在 `go-to-openai/` 目录执行：
+首先编译项目：
 
 ```bash
-go run ./cmd/gen-certs --domains api.openai.com,api.anthropic.com
+go build -o go-to-openai .
 ```
 
-第一个域名会作为主域名，决定输出文件名；其余域名会写入同一张服务端证书的 SAN 中。
+### 1. 生成根证书
+
+```bash
+./go-to-openai root-crt-gen
+```
 
 生成的文件：
 
-- `cert/openaica.crt` - CA 证书
-- `cert/openaica.key` - CA 私钥
-- `cert/api.openai.com.crt` - 服务端证书（包含所有域名的 SAN）
-- `cert/api.openai.com.key` - 服务端私钥
-- `cert/api.openai.com.csr` - 证书签名请求
+- `cert/goto-openai-root.crt` - 根 CA 证书
+- `cert/goto-openai-root.key` - 根 CA 私钥
 
-### 指定输出目录
+### 2. 安装根证书到系统信任存储
 
 ```bash
-go run ./cmd/gen-certs --domains api.openai.com,api.anthropic.com --output /tmp/my-certs
+sudo ./go-to-openai root-crt-install
 ```
 
-### 自定义 CA 和证书有效期
+支持的平台：
+
+- **Linux (Debian/Ubuntu)**: 自动复制到 `/usr/local/share/ca-certificates/` 并更新
+- **Linux (RHEL/CentOS/Fedora)**: 自动复制到 `/etc/pki/ca-trust/source/anchors/` 并更新
+- **macOS**: 使用 `security` 命令安装到系统钥匙串
+- **Windows**: 使用 `certutil` 安装到本地计算机信任存储（需要管理员权限）
+
+### 3. 生成域名证书
+
+为每个需要代理的域名生成独立的证书：
 
 ```bash
-go run ./cmd/gen-certs \
-  --domains api.openai.com,api.anthropic.com \
-  --ca-cn "My Local CA" \
-  --ca-org "My Team" \
-  --ca-days 3650 \
-  --server-days 825
+./go-to-openai domain-crt-gen "api.openai.com"
+./go-to-openai domain-crt-gen "api.anthropic.com"
 ```
 
-## 导入 CA 证书
+生成的文件：
 
-### Debian/Ubuntu
+- `cert/goto-openai-dm-api.openai.com.crt` - 域名证书
+- `cert/goto-openai-dm-api.openai.com.key` - 域名私钥
+
+### 4. 启动代理服务
 
 ```bash
-sudo cp cert/openaica.crt /usr/local/share/ca-certificates/openaica.crt
-sudo update-ca-certificates
+sudo ./go-to-openai run -config="./config.json"
 ```
 
-### macOS
+## 命令参考
+
+### root-crt-gen
+
+生成根 CA 证书。
 
 ```bash
-sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain cert/openaica.crt
+./go-to-openai root-crt-gen [options]
 ```
 
-### 删除 CA
+选项：
+
+| 选项 | 说明 | 默认值 |
+|---|---|---|
+| `--ca-cn` | CA 通用名称 | `Go-To-OpenAI Root CA` |
+| `--ca-org` | CA 组织名称 | `Go-To-OpenAI` |
+| `--ca-days` | 证书有效期（天） | `3650` |
+| `--output-dir` | 输出目录 | `./cert` |
+
+### root-crt-install
+
+安装根 CA 证书到系统信任存储。
 
 ```bash
-# Debian/Ubuntu
-sudo rm -f /usr/local/share/ca-certificates/openaica.crt
-sudo update-ca-certificates --fresh
-
-# macOS
-sudo security delete-certificate -c "My Local CA" /Library/Keychains/System.keychain
+sudo ./go-to-openai root-crt-install [options]
 ```
+
+选项：
+
+| 选项 | 说明 | 默认值 |
+|---|---|---|
+| `--cert-path` | 根证书路径 | `./cert/goto-openai-root.crt` |
+
+### domain-crt-gen
+
+为指定域名生成服务端证书。
+
+```bash
+./go-to-openai domain-crt-gen <domain> [options]
+```
+
+选项：
+
+| 选项 | 说明 | 默认值 |
+|---|---|---|
+| `--root-ca-cert` | 根证书路径 | `./cert/goto-openai-root.crt` |
+| `--root-ca-key` | 根私钥路径 | `./cert/goto-openai-root.key` |
+| `--server-days` | 证书有效期（天） | `825` |
+| `--output-dir` | 输出目录 | `./cert` |
+
+### run
+
+启动 HTTPS 代理服务。
+
+```bash
+sudo ./go-to-openai run [options]
+```
+
+选项：
+
+| 选项 | 说明 | 默认值 |
+|---|---|---|
+| `-config` | 配置文件路径 | `./config.json` |
+| `-debug` | 开启调试模式 | `false` |
 
 ## 配置
 
@@ -106,8 +162,8 @@ sudo security delete-certificate -c "My Local CA" /Library/Keychains/System.keyc
 ```json
 {
   "listen_addr": "127.0.0.1:443",
-  "tls_cert_file": "./cert/api.openai.com.crt",
-  "tls_key_file": "./cert/api.openai.com.key",
+  "tls_cert_file": "./cert/goto-openai-dm-api.openai.com.crt",
+  "tls_key_file": "./cert/goto-openai-dm-api.openai.com.key",
   "retry_max": 3,
   "upstreams": [
     {
@@ -166,45 +222,6 @@ sudo security delete-certificate -c "My Local CA" /Library/Keychains/System.keyc
 | `TLS_CERT_FILE` | TLS 证书路径 |
 | `TLS_KEY_FILE` | TLS 私钥路径 |
 
-## 启动
-
-在 `go-to-openai` 目录执行：
-
-```bash
-go run .
-```
-
-或先编译：
-
-```bash
-go build -o go-to-openai .
-./go-to-openai
-```
-
-指定配置文件：
-
-```bash
-go run . -config /path/to/config.json
-```
-
-开启调试模式（请求 dump 到 `.logs` 目录）：
-
-```bash
-go run . -debug
-```
-
-如果你只是本地验证，不想占用 `443`：
-
-```bash
-LISTEN_ADDR=:8443 go run .
-```
-
-## 健康检查
-
-```bash
-curl https://api.openai.com/healthz
-```
-
 ## 验证示例
 
 ### chat completions
@@ -240,6 +257,12 @@ curl --location 'https://api.openai.com/v1/responses' \
   }'
 ```
 
+## 健康检查
+
+```bash
+curl https://api.openai.com/healthz
+```
+
 ## 特性
 
 - 支持多域名代理，根据 Host 头自动路由
@@ -249,3 +272,5 @@ curl --location 'https://api.openai.com/v1/responses' \
 - 网络错误自动重试
 - 结构化日志输出
 - 调试模式可 dump 请求内容
+- 跨平台证书安装支持（Linux/macOS/Windows）
+- 统一的 CLI 命令结构，易于使用

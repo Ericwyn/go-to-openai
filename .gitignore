@@ -5,3 +5,4 @@
 /scripts/
 /config*json
 /.logs/
+/.vscode/*

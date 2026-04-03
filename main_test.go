@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"io"
 	"net"
@@ -566,10 +568,10 @@ func TestRetryTransportDoesNotRetryNonRetryableError(t *testing.T) {
 	}
 }
 
-func TestParseFlags(t *testing.T) {
+func TestParseRunFlags(t *testing.T) {
 	t.Parallel()
 
-	opts := parseFlags(nil)
+	opts := parseRunFlags(nil)
 	if opts.ConfigFile != defaultConfigFile {
 		t.Fatalf("default config file = %s", opts.ConfigFile)
 	}
@@ -578,7 +580,7 @@ func TestParseFlags(t *testing.T) {
 	}
 
 	custom := "/tmp/custom-config.json"
-	opts = parseFlags([]string{"-config", custom, "-debug"})
+	opts = parseRunFlags([]string{"-config", custom, "-debug"})
 	if opts.ConfigFile != custom {
 		t.Fatalf("config file = %s", opts.ConfigFile)
 	}
@@ -774,6 +776,100 @@ func TestUnsupportedPath(t *testing.T) {
 	}
 }
 
+func TestRootPathReturnsStatusPage(t *testing.T) {
+	t.Parallel()
+
+	handler := newTestHandler(t, config{
+		ListenAddr: ":8443",
+		CertFile:   "./cert/test.crt",
+		KeyFile:    "./cert/test.key",
+		Upstreams: []upstreamConfig{
+			{
+				Host:    "api.openai.com",
+				BaseURL: "http://api.openai.com",
+				Routes: []routeConfig{
+					{Path: "/v1/chat/completions", TargetPath: "/v1/chat/completions"},
+				},
+			},
+		},
+	}, false)
+
+	recorder := httptest.NewRecorder()
+	req, err := http.NewRequest(http.MethodGet, "https://api.openai.com/", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+
+	handler.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+
+	body := recorder.Body.String()
+	if !strings.Contains(body, "go-to-openai HTTPS Proxy Server") {
+		t.Fatalf("body missing server title: %s", body)
+	}
+	if !strings.Contains(body, "Listen Address: :8443") {
+		t.Fatalf("body missing listen address: %s", body)
+	}
+	if !strings.Contains(body, "TLS Certificate: ./cert/test.crt") {
+		t.Fatalf("body missing cert file: %s", body)
+	}
+	if !strings.Contains(body, "TLS Key: ./cert/test.key") {
+		t.Fatalf("body missing key file: %s", body)
+	}
+	if !strings.Contains(body, "Host: api.openai.com") {
+		t.Fatalf("body missing host: %s", body)
+	}
+	if !strings.Contains(body, "Base URL: http://api.openai.com") {
+		t.Fatalf("body missing base url: %s", body)
+	}
+	if !strings.Contains(body, "/v1/chat/completions") {
+		t.Fatalf("body missing route: %s", body)
+	}
+}
+
+func TestRootPathWithProxyConfig(t *testing.T) {
+	t.Parallel()
+
+	requests := make(chan string, 1)
+	handler := newTestHandler(t, config{
+		Upstreams: []upstreamConfig{
+			{
+				Host:    "api.openai.com",
+				BaseURL: "http://api.openai.com",
+				Routes: []routeConfig{
+					{Path: "/", TargetPath: "/index"},
+				},
+			},
+		},
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			requests <- r.URL.Path
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/plain"}},
+				Body:       io.NopCloser(strings.NewReader("proxied")),
+			}, nil
+		}),
+	}, false)
+
+	req, err := http.NewRequest(http.MethodGet, "https://api.openai.com/", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+
+	if got := <-requests; got != "/index" {
+		t.Fatalf("path = %s, want /index", got)
+	}
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+}
+
 func newTestHandler(t *testing.T, cfg config, debug bool) http.Handler {
 	t.Helper()
 
@@ -790,4 +886,181 @@ func newTestHandler(t *testing.T, cfg config, debug bool) http.Handler {
 	}
 
 	return handler
+}
+
+func TestGenerateRootCA(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+
+	err := generateRootCA("Test Root CA", "Test Org", 365, tempDir)
+	if err != nil {
+		t.Fatalf("generate root CA: %v", err)
+	}
+
+	certPath := filepath.Join(tempDir, defaultRootCAName+".crt")
+	keyPath := filepath.Join(tempDir, defaultRootCAName+".key")
+
+	if _, err := os.Stat(certPath); err != nil {
+		t.Fatalf("certificate file not created: %v", err)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("key file not created: %v", err)
+	}
+
+	certPEM, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatalf("read certificate: %v", err)
+	}
+	keyPEM, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("read key: %v", err)
+	}
+
+	certBlock, _ := pem.Decode(certPEM)
+	if certBlock == nil {
+		t.Fatal("failed to decode certificate PEM")
+	}
+	cert, err := x509.ParseCertificate(certBlock.Bytes)
+	if err != nil {
+		t.Fatalf("parse certificate: %v", err)
+	}
+
+	if !cert.IsCA {
+		t.Fatal("certificate is not a CA")
+	}
+	if cert.Subject.CommonName != "Test Root CA" {
+		t.Fatalf("common name = %s, want Test Root CA", cert.Subject.CommonName)
+	}
+	if len(cert.Subject.Organization) != 1 || cert.Subject.Organization[0] != "Test Org" {
+		t.Fatalf("organization = %v", cert.Subject.Organization)
+	}
+
+	keyBlock, _ := pem.Decode(keyPEM)
+	if keyBlock == nil {
+		t.Fatal("failed to decode key PEM")
+	}
+	if keyBlock.Type != "RSA PRIVATE KEY" {
+		t.Fatalf("key type = %s, want RSA PRIVATE KEY", keyBlock.Type)
+	}
+}
+
+func TestGenerateDomainCert(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+
+	err := generateRootCA("Test Root CA", "Test Org", 365, tempDir)
+	if err != nil {
+		t.Fatalf("generate root CA: %v", err)
+	}
+
+	rootCACert := filepath.Join(tempDir, defaultRootCAName+".crt")
+	rootCAKey := filepath.Join(tempDir, defaultRootCAName+".key")
+
+	err = generateDomainCert("api.openai.com", rootCACert, rootCAKey, 365, tempDir)
+	if err != nil {
+		t.Fatalf("generate domain cert: %v", err)
+	}
+
+	certPath := filepath.Join(tempDir, defaultDomainPrefix+"-api.openai.com.crt")
+	keyPath := filepath.Join(tempDir, defaultDomainPrefix+"-api.openai.com.key")
+
+	if _, err := os.Stat(certPath); err != nil {
+		t.Fatalf("certificate file not created: %v", err)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("key file not created: %v", err)
+	}
+
+	certPEM, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatalf("read certificate: %v", err)
+	}
+	keyPEM, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("read key: %v", err)
+	}
+
+	certBlock, _ := pem.Decode(certPEM)
+	if certBlock == nil {
+		t.Fatal("failed to decode certificate PEM")
+	}
+	cert, err := x509.ParseCertificate(certBlock.Bytes)
+	if err != nil {
+		t.Fatalf("parse certificate: %v", err)
+	}
+
+	if cert.IsCA {
+		t.Fatal("server certificate should not be a CA")
+	}
+	if cert.Subject.CommonName != "api.openai.com" {
+		t.Fatalf("common name = %s, want api.openai.com", cert.Subject.CommonName)
+	}
+	if len(cert.DNSNames) != 1 || cert.DNSNames[0] != "api.openai.com" {
+		t.Fatalf("DNS names = %v", cert.DNSNames)
+	}
+
+	keyBlock, _ := pem.Decode(keyPEM)
+	if keyBlock == nil {
+		t.Fatal("failed to decode key PEM")
+	}
+	if keyBlock.Type != "RSA PRIVATE KEY" {
+		t.Fatalf("key type = %s, want RSA PRIVATE KEY", keyBlock.Type)
+	}
+}
+
+func TestGenerateDomainCertWithMissingRootCA(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+
+	err := generateDomainCert("api.openai.com", filepath.Join(tempDir, "missing.crt"), filepath.Join(tempDir, "missing.key"), 365, tempDir)
+	if err == nil {
+		t.Fatal("expected error when root CA is missing, got nil")
+	}
+}
+
+func TestNewCATemplate(t *testing.T) {
+	t.Parallel()
+
+	template, err := newCATemplate("Test CA", "Test Org", 365)
+	if err != nil {
+		t.Fatalf("new CA template: %v", err)
+	}
+
+	if template.Subject.CommonName != "Test CA" {
+		t.Fatalf("common name = %s, want Test CA", template.Subject.CommonName)
+	}
+	if len(template.Subject.Organization) != 1 || template.Subject.Organization[0] != "Test Org" {
+		t.Fatalf("organization = %v", template.Subject.Organization)
+	}
+	if !template.IsCA {
+		t.Fatal("template should be a CA")
+	}
+	if template.KeyUsage&x509.KeyUsageCertSign == 0 {
+		t.Fatal("template should have KeyUsageCertSign")
+	}
+}
+
+func TestNewServerTemplate(t *testing.T) {
+	t.Parallel()
+
+	template, err := newServerTemplate([]string{"api.openai.com", "127.0.0.1"}, "Test Org", 365)
+	if err != nil {
+		t.Fatalf("new server template: %v", err)
+	}
+
+	if template.Subject.CommonName != "api.openai.com" {
+		t.Fatalf("common name = %s, want api.openai.com", template.Subject.CommonName)
+	}
+	if len(template.DNSNames) != 1 || template.DNSNames[0] != "api.openai.com" {
+		t.Fatalf("DNS names = %v", template.DNSNames)
+	}
+	if len(template.IPAddresses) != 1 || template.IPAddresses[0].String() != "127.0.0.1" {
+		t.Fatalf("IP addresses = %v", template.IPAddresses)
+	}
+	if template.IsCA {
+		t.Fatal("server template should not be a CA")
+	}
 }
