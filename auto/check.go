@@ -2,7 +2,11 @@ package auto
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+
+	"github.com/ericwyn/go-to-openai/certmanager"
 )
 
 func CheckConfiguration() error {
@@ -21,10 +25,36 @@ func CheckConfiguration() error {
 }
 
 func checkRootCert() {
-	if RootCertExists() {
-		fmt.Println("[✓] 根证书: 已存在")
+	certPath := filepath.Join(DefaultCertDir, certmanager.DefaultRootCAName+".crt")
+	keyPath := filepath.Join(DefaultCertDir, certmanager.DefaultRootCAName+".key")
+
+	localCertExists := fileExists(certPath)
+	localKeyExists := fileExists(keyPath)
+
+	if localCertExists && localKeyExists {
+		fmt.Println("[✓] 根证书 (cert目录): 已存在")
+	} else if localCertExists {
+		fmt.Println("[!] 根证书 (cert目录): 证书存在但私钥缺失")
 	} else {
-		fmt.Println("[✗] 根证书: 不存在")
+		fmt.Println("[✗] 根证书 (cert目录): 不存在")
+		return
+	}
+
+	installed, err := certmanager.IsRootCAInstalled(certPath)
+	if err != nil {
+		fmt.Printf("[!] 根证书 (系统信任): 检查失败 (%v)\n", err)
+		return
+	}
+
+	if installed {
+		fmt.Println("[✓] 根证书 (系统信任): 已安装")
+	} else {
+		fmt.Println("[✗] 根证书 (系统信任): 未安装")
+	}
+
+	fingerprint, err := certmanager.GetCertFingerprint(certPath)
+	if err == nil {
+		fmt.Printf("  证书指纹: SHA256:%s\n", fingerprint)
 	}
 }
 
@@ -117,4 +147,9 @@ func checkHostsMatch() {
 	if len(notInHosts) > 0 {
 		fmt.Printf("[!] Hosts 匹配: 以下域名在配置文件中但不在 hosts 中: %s\n", strings.Join(notInHosts, ", "))
 	}
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }

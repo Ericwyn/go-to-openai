@@ -2,6 +2,8 @@ package auto
 
 import (
 	"bufio"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -76,6 +78,51 @@ func DomainCertExists(domain string) bool {
 	_, keyErr := os.Stat(keyPath)
 
 	return certErr == nil && keyErr == nil
+}
+
+func VerifyDomainCertSignedByRoot(domain string) (bool, error) {
+	domainCertPath := filepath.Join(DefaultCertDir, certmanager.DefaultDomainPrefix+"-"+domain+".crt")
+	rootCertPath := filepath.Join(DefaultCertDir, certmanager.DefaultRootCAName+".crt")
+
+	domainData, err := os.ReadFile(domainCertPath)
+	if err != nil {
+		return false, fmt.Errorf("读取域名证书失败: %w", err)
+	}
+
+	rootData, err := os.ReadFile(rootCertPath)
+	if err != nil {
+		return false, fmt.Errorf("读取根证书失败: %w", err)
+	}
+
+	domainBlock, _ := pem.Decode(domainData)
+	if domainBlock == nil {
+		return false, fmt.Errorf("解析域名证书 PEM 失败")
+	}
+
+	rootBlock, _ := pem.Decode(rootData)
+	if rootBlock == nil {
+		return false, fmt.Errorf("解析根证书 PEM 失败")
+	}
+
+	domainCert, err := x509.ParseCertificate(domainBlock.Bytes)
+	if err != nil {
+		return false, fmt.Errorf("解析域名证书失败: %w", err)
+	}
+
+	rootCert, err := x509.ParseCertificate(rootBlock.Bytes)
+	if err != nil {
+		return false, fmt.Errorf("解析根证书失败: %w", err)
+	}
+
+	roots := x509.NewCertPool()
+	roots.AddCert(rootCert)
+
+	opts := x509.VerifyOptions{
+		Roots: roots,
+	}
+
+	_, err = domainCert.Verify(opts)
+	return err == nil, nil
 }
 
 func parseDomains(input string) []string {

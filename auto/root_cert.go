@@ -77,3 +77,57 @@ func RootCertExists() bool {
 
 	return certErr == nil && keyErr == nil
 }
+
+func SyncRootCertToSystem() error {
+	certPath := filepath.Join(DefaultCertDir, certmanager.DefaultRootCAName+".crt")
+	keyPath := filepath.Join(DefaultCertDir, certmanager.DefaultRootCAName+".key")
+
+	localCertExists := RootCertExists()
+
+	if !localCertExists {
+		fmt.Println("  本地根证书不存在，正在生成...")
+		if err := GenerateRootCert(); err != nil {
+			return fmt.Errorf("生成根证书失败: %w", err)
+		}
+		fmt.Println("  正在安装新生成的根证书到系统...")
+		if err := InstallRootCert(); err != nil {
+			return fmt.Errorf("安装根证书失败: %w", err)
+		}
+		fmt.Println("  根证书已生成并安装到系统")
+		return nil
+	}
+
+	installed, err := certmanager.IsRootCAInstalled(certPath)
+	if err != nil {
+		return fmt.Errorf("检查系统根证书失败: %w", err)
+	}
+
+	if !installed {
+		fmt.Println("  系统未安装本地根证书，正在安装...")
+		if err := InstallRootCert(); err != nil {
+			return fmt.Errorf("安装根证书失败: %w", err)
+		}
+		fmt.Println("  根证书已安装到系统")
+		return nil
+	}
+
+	_, keyErr := os.Stat(keyPath)
+	if keyErr != nil {
+		fmt.Println("  系统已安装根证书，但本地私钥缺失，正在重新生成...")
+		if err := GenerateRootCert(); err != nil {
+			return fmt.Errorf("重新生成根证书失败: %w", err)
+		}
+		fmt.Println("  正在重新安装根证书到系统...")
+		if err := RemoveRootCert(); err != nil {
+			fmt.Printf("  警告: 移除旧根证书失败: %v\n", err)
+		}
+		if err := InstallRootCert(); err != nil {
+			return fmt.Errorf("安装根证书失败: %w", err)
+		}
+		fmt.Println("  根证书已重新生成并安装到系统")
+		return nil
+	}
+
+	fmt.Println("  根证书已存在且系统已安装，跳过")
+	return nil
+}

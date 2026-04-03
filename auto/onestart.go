@@ -24,15 +24,11 @@ func OneKeyStart() error {
 	}
 	fmt.Println("  配置文件加载成功")
 
-	fmt.Println("[2/5] 检查/生成根证书...")
-	if !RootCertExists() {
-		fmt.Println("  根证书不存在，正在生成...")
-		if err := GenerateRootCert(); err != nil {
-			return fmt.Errorf("生成根证书失败: %w", err)
-		}
-	} else {
-		fmt.Println("  根证书已存在，跳过生成")
+	fmt.Println("[2/5] 检查/同步根证书到系统...")
+	if err := SyncRootCertToSystem(); err != nil {
+		return fmt.Errorf("同步根证书失败: %w", err)
 	}
+	fmt.Println("  根证书同步完成")
 
 	fmt.Println("[3/5] 生成域名证书...")
 	for _, upstream := range cfg.Upstreams {
